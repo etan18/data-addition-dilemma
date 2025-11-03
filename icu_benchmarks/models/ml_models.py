@@ -2,6 +2,7 @@ import gin
 import lightgbm as lgbm
 import numpy as np
 import wandb
+from catboost import CatBoostClassifier as CatBoostModel, Pool
 from sklearn import linear_model
 from sklearn import ensemble
 from sklearn import neural_network
@@ -51,6 +52,37 @@ class LGBMRegressor(LGBMWrapper):
     def __init__(self, *args, **kwargs):
         self.model = self.set_model_args(lgbm.LGBMRegressor, *args, **kwargs)
         super().__init__(*args, **kwargs)
+
+
+@gin.configurable
+class CatBoostClassifier(MLWrapper):
+    _supported_run_modes = [RunMode.classification]
+
+    def __init__(self, *args, **kwargs):
+        self.model = self.set_model_args(CatBoostModel, *args, **kwargs)
+        super().__init__(*args, **kwargs)
+
+    def fit_model(self, train_data, train_labels, val_data, val_labels):
+        """Train CatBoost with early stopping and return validation loss."""
+        train_pool = Pool(train_data, label=train_labels)
+        val_pool = Pool(val_data, label=val_labels)
+
+        # Keep runs reproducible but still leverage gin-configured params.
+        self.model.set_params(random_seed=int(np.random.get_state()[1][0]))
+
+        self.model.fit(
+            train_pool,
+            eval_set=val_pool,
+            verbose=True,
+            use_best_model=True,
+            early_stopping_rounds=self.hparams.patience,
+        )
+
+        val_pred = self.model.predict_proba(val_data)
+        return self.loss(val_labels, val_pred)
+
+    def predict(self, features):
+        return self.model.predict_proba(features)
 
 
 # Scikit-learn models
