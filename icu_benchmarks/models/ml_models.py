@@ -2,13 +2,16 @@ import gin
 import lightgbm as lgbm
 import numpy as np
 import wandb
+from pathlib import Path
+from catboost import CatBoostClassifier as CatBoostModel, Pool
 from sklearn import linear_model
 from sklearn import ensemble
 from sklearn import neural_network
 from sklearn import svm
 from icu_benchmarks.models.wrappers import MLWrapper
 from icu_benchmarks.contants import RunMode
-from wandb.lightgbm import wandb_callback
+from icu_benchmarks.models.utils import export_catboost_feature_artifacts
+from wandb.integration.lightgbm import wandb_callback
 
 
 class LGBMWrapper(MLWrapper):
@@ -51,6 +54,58 @@ class LGBMRegressor(LGBMWrapper):
     def __init__(self, *args, **kwargs):
         self.model = self.set_model_args(lgbm.LGBMRegressor, *args, **kwargs)
         super().__init__(*args, **kwargs)
+
+
+@gin.configurable
+class CatBoostClassifier(MLWrapper):
+    _supported_run_modes = [RunMode.classification]
+
+    def __init__(
+        self,
+        *args,
+        log_feature_artifacts: bool = True,
+        feature_artifact_subdir: str = "feature_analysis",
+        save_catboost_model_json: bool = False,
+        **kwargs,
+    ):
+        self.log_feature_artifacts = log_feature_artifacts
+        self.feature_artifact_subdir = feature_artifact_subdir
+        self.save_catboost_model_json = save_catboost_model_json
+        self.model = self.set_model_args(CatBoostModel, *args, **kwargs)
+        super().__init__(*args, **kwargs)
+
+    def fit_model(self, train_data, train_labels, val_data, val_labels):
+        """Train CatBoost with early stopping and return validation loss."""
+        train_pool = Pool(train_data, label=train_labels)
+        val_pool = Pool(val_data, label=val_labels)
+
+        # Keep runs reproducible but still leverage gin-configured params.
+        self.model.set_params(random_seed=int(np.random.get_state()[1][0]))
+
+        self.model.fit(
+            train_pool,
+            eval_set=val_pool,
+            verbose=True,
+            use_best_model=True,
+            early_stopping_rounds=self.hparams.patience,
+        )
+
+        val_pred = self.model.predict_proba(val_data)
+        return self.loss(val_labels, val_pred)
+
+    def predict(self, features):
+        return self.model.predict_proba(features)
+
+    def save_model(self, save_path, file_name, file_extension=".joblib"):
+        super().save_model(save_path, file_name, file_extension)
+        if self.log_feature_artifacts:
+            artifact_dir = Path(save_path) / self.feature_artifact_subdir
+            export_catboost_feature_artifacts(
+                self.model,
+                getattr(self, "trained_columns", None),
+                artifact_dir,
+                save_model_json=self.save_catboost_model_json,
+            )
 
 
 # Scikit-learn models

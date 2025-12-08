@@ -1,0 +1,19 @@
+# Settings for CatBoost classifier.
+
+include "configs/prediction_models/common/MLCommon.gin"
+
+train_common.model = @CatBoostClassifier
+
+model/hyperparameter.class_to_tune = @CatBoostClassifier
+model/hyperparameter.loss_function = "Logloss"
+model/hyperparameter.eval_metric = "Logloss"
+model/hyperparameter.depth = (3, 5, 7, 9, 11)
+model/hyperparameter.iterations = (500, 1000, 2000, 4000)
+model/hyperparameter.learning_rate = (1e-3, 0.3, "log-uniform")
+model/hyperparameter.l2_leaf_reg = (1e-2, 10.0, "log-uniform")
+model/hyperparameter.random_strength = (0.0, 2.0)
+model/hyperparameter.border_count = (32, 64, 128, 254)
+model/hyperparameter.subsample = (0.5, 0.7, 0.9, 1.0)
+model/hyperparameter.min_data_in_leaf = (5, 20, 50, 100)
+model/hyperparameter.bootstrap_type = ("Bernoulli", "Poisson", "No")
+model/hyperparameter.verbose = False

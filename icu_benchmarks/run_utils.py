@@ -1,7 +1,7 @@
 import importlib
 import sys
 import warnings
-from math import sqrt
+from math import sqrt, isnan
 
 import gin
 import torch
@@ -32,6 +32,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("-m", "--model", default="LGBMClassifier", help="Name of the model gin.")
     parser.add_argument("-e", "--experiment", help="Name of the experiment gin.")
     parser.add_argument("-l", "--log-dir", default=Path("../yaib_logs/"), type=Path, help="Log directory for model weights.")
+    parser.add_argument("-ls", "--log-dir-suffix", default="", type=str, help="Optional suffix appended to the generated log directory name.")
     parser.add_argument("-s", "--seed", default=1234, type=int, help="Random seed for processing, tuning and training.")
     parser.add_argument("-v", "--verbose", default=False, action=BOA, help="Set to log verbosly. Disable for clean logs.")
     parser.add_argument("--cpu", default=False, action=BOA, help="Set to use CPU.")
@@ -143,7 +144,16 @@ def aggregate_results(log_dir: Path, execution_time: timedelta = None):
 
     # Calculate the population standard deviation over aggregated results over folds/iterations
     # Divide by sqrt(n) to get standard deviation.
-    std_scores = {metric: (pstdev(list) / sqrt(len(list))) for metric, list in list_scores.items()}
+    # std_scores = {metric: (pstdev(list) / sqrt(len(list))) for metric, list in list_scores.items()}
+    
+    std_scores = {}
+    for metric, list in list_scores.items():
+        # Filter out NaN values
+        filtered_list = [x for x in list if not isinstance(x, float) or not isnan(x)]
+        if filtered_list:  # Only calculate if we have valid values
+            std_scores[metric] = pstdev(filtered_list) / sqrt(len(filtered_list))
+        else:
+            std_scores[metric] = float('nan')
 
     confidence_interval = {
         metric: (stats.t.interval(0.95, len(list) - 1, loc=mean(list), scale=stats.sem(list)))

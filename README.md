@@ -9,6 +9,7 @@ Specifically:
 - [icu_benchmarks](icu_benchmarks): contains modified files preprocessing and training.
 - [fairness](fairness): contains notebooks for analyzing and parsing YAIB outputs by subgroup (race or gender)
 
+### Changelog 
 ________
 
 ![YAIB logo](https://github.com/rvandewater/YAIB/blob/development/docs/figures/yaib_logo.png?raw=true)

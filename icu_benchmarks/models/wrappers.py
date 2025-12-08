@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Optional, Union
 import torchmetrics
 from sklearn.metrics import log_loss, mean_squared_error, roc_auc_score
 from sklearn.calibration import calibration_curve
+from sklearn.pipeline import Pipeline
 
 import torch
 from torch.nn import MSELoss, CrossEntropyLoss
@@ -155,25 +156,49 @@ class DLWrapper(BaseModule, ABC):
         }
         return super().on_train_start()
 
+    # def finalize_step(self, step_prefix=""):
+    #     try:
+    #         self.log_dict(
+    #             {
+    #                 f"{step_prefix}/{name}": (
+    #                     np.float32(metric.compute()) if isinstance(metric.compute(), np.float64) else metric.compute()
+    #                 )
+    #                 for name, metric in self.metrics[step_prefix].items()
+    #                 if "_Curve" not in name
+    #             },
+    #             sync_dist=True,
+    #         )
+    #         for metric in self.metrics[step_prefix].values():
+    #             metric.reset()
+    #     except (NotComputableError, ValueError):
+    #         if step_prefix not in self._metrics_warning_printed:
+    #             self._metrics_warning_printed.add(step_prefix)
+    #             logging.warning(f"Metrics for {step_prefix} not computable")
+    #         pass
+
     def finalize_step(self, step_prefix=""):
-        try:
-            self.log_dict(
-                {
-                    f"{step_prefix}/{name}": (
-                        np.float32(metric.compute()) if isinstance(metric.compute(), np.float64) else metric.compute()
-                    )
-                    for name, metric in self.metrics[step_prefix].items()
-                    if "_Curve" not in name
-                },
-                sync_dist=True,
-            )
-            for metric in self.metrics[step_prefix].values():
-                metric.reset()
-        except (NotComputableError, ValueError):
-            if step_prefix not in self._metrics_warning_printed:
-                self._metrics_warning_printed.add(step_prefix)
-                logging.warning(f"Metrics for {step_prefix} not computable")
-            pass
+        values = {}
+        for name, metric in self.metrics[step_prefix].items():
+            if "_Curve" in name:
+                continue
+            try:
+                v = metric.compute()
+            except (NotComputableError, ValueError):
+                if step_prefix not in self._metrics_warning_printed:
+                    self._metrics_warning_printed.add(step_prefix)
+                    logging.warning(f"Metrics for {step_prefix} not computable")
+                v = float("nan")  # <-- still log the key
+            # cast numpy float64 -> float32 (Lightning-safe)
+            if isinstance(v, np.float64):
+                v = np.float32(v)
+            # If a metric returns a tuple/dict, skip it here
+            if not isinstance(v, (tuple, dict)):
+                values[f"{step_prefix}/{name}"] = v
+
+        # Every rank calls this with the same keys
+        self.log_dict(values, sync_dist=True)
+        for m in self.metrics[step_prefix].values():
+            m.reset()
 
     def configure_optimizers(self):
         """Configure optimizers and learning rate schedulers."""
@@ -366,7 +391,16 @@ class MLWrapper(BaseModule, ABC):
     requires_backprop = False
     _supported_run_modes = [RunMode.classification, RunMode.regression]
 
-    def __init__(self, *args, run_mode=RunMode.classification, loss=log_loss, patience=10, mps=False, **kwargs):
+    def __init__(
+        self,
+        *args,
+        run_mode=RunMode.classification,
+        loss=log_loss,
+        patience=10,
+        mps=False,
+        kernel=None,
+        **kwargs,
+    ):
         super().__init__()
         self.save_hyperparameters()
         self.scaler = None
@@ -375,6 +409,51 @@ class MLWrapper(BaseModule, ABC):
         self.loss = loss
         self.patience = patience
         self.mps = mps
+        self.kernel = kernel
+        self.weight = None
+
+        if not hasattr(self, "model"):
+            raise AttributeError("MLWrapper subclasses must set self.model before calling super().__init__().")
+        self._attach_kernel_transformer()
+
+    def _attach_kernel_transformer(self):
+        if self.kernel is None:
+            return
+        if not hasattr(self.kernel, "fit") or not hasattr(self.kernel, "transform"):
+            raise ValueError("Kernel transformers must implement fit() and transform().")
+        self.model = Pipeline([("kernel", self.kernel), ("estimator", self.model)])
+
+    def _get_final_estimator(self):
+        if isinstance(self.model, Pipeline):
+            return self.model.named_steps["estimator"]
+        return self.model
+
+    def _apply_class_weight(self):
+        if self.weight is None:
+            return
+        estimator = self._get_final_estimator()
+        if hasattr(estimator, "get_params") and "class_weight" in estimator.get_params().keys():
+            estimator.set_params(class_weight=self.weight)
+
+    def set_weight(self, weight, dataset):
+        """Store per-class weights so sklearn estimators can consume them."""
+        if weight is None:
+            self.weight = None
+            return
+
+        if isinstance(weight, (list, tuple, np.ndarray)):
+            labels = dataset.outcome_df[dataset.vars["LABEL"]].to_numpy()
+            classes = np.unique(labels)
+            if len(weight) != len(classes):
+                logging.warning(
+                    "Received %s weights for %s classes; truncating to the shorter length.",
+                    len(weight),
+                    len(classes),
+                )
+            weights = {cls: weight[idx] for idx, cls in enumerate(classes[: len(weight)])}
+            self.weight = weights
+        else:
+            self.weight = weight
 
     def set_metrics(self, labels):
         if self.run_mode == RunMode.classification:
@@ -408,8 +487,7 @@ class MLWrapper(BaseModule, ABC):
         val_rep, val_label = val_dataset.get_data_and_labels()
         
         self.set_metrics(train_label)
-        if "class_weight" in self.model.get_params().keys():  # Set class weights
-            self.model.set_params(class_weight=self.weight)
+        self._apply_class_weight()
 
         val_loss = self.fit_model(train_rep, train_label, val_rep, val_label)
 
