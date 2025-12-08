@@ -6,9 +6,9 @@ import logging
 
 import gin
 import pandas as pd
-from recipys.recipe import Recipe
-from recipys.selector import all_numeric_predictors, all_outcomes, has_type, all_of
-from recipys.step import (
+from recipies import Recipe
+from recipies.selector import all_numeric_predictors, all_outcomes, has_type, all_of
+from recipies.step import (
     StepScale,
     StepImputeFastForwardFill,
     StepImputeFastZeroFill,

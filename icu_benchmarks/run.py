@@ -122,6 +122,9 @@ def main(my_args=tuple(sys.argv[1:])):
             if experiment
             else (log_dir_name / (args.task_name if args.task_name is not None else args.task) / model)
         )
+
+    if args.log_dir_suffix:
+        log_dir = log_dir.parent / f"{log_dir.name}{args.log_dir_suffix}"
     log_full_line(f"Logging to {log_dir}.", logging.INFO)
 
     # Check cuda availability

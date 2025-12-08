@@ -38,8 +38,7 @@ class MLMetrics:
         "PR": average_precision_score,
         "PR_Curve": precision_recall_curve,
         "RO_Curve": roc_curve,
-        #"Binary_Fairness": BinaryFairnessWrapper(num_groups=2, task="demographic_parity", group_name="sex"),
-        #"Subgroup_AUC": SubgroupAUC, 
+        "R2": r2_score,
     }
 
     MULTICLASS_CLASSIFICATION = {

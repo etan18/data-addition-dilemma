@@ -86,6 +86,49 @@ def create_scheduler(
         raise ValueError(f"no scheduler with name {scheduler_name} found!")
 
 
+def export_catboost_feature_artifacts(model, feature_names, output_dir: Path, save_model_json: bool = False):
+    """
+    Persist CatBoost global feature importances and pairwise interactions in a readable form.
+    Optionally dumps the full model as JSON to inspect tree splits.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    names = list(feature_names) if feature_names is not None else None
+    def _name(idx: int) -> str:
+        if names and idx < len(names):
+            return names[idx]
+        return f"feature_{idx}"
+
+    try:
+        importances = model.get_feature_importance(type="FeatureImportance")
+        fi_pretty = [
+            {"feature": _name(i), "importance": float(score)}
+            for i, score in enumerate(importances)
+        ]
+        fi_pretty.sort(key=lambda item: item["importance"], reverse=True)
+        (output_dir / "feature_importances.json").write_text(json.dumps(fi_pretty, indent=2))
+    except Exception as e:
+        logging.warning("Could not export CatBoost feature importances: %s", e)
+
+    try:
+        interactions = model.get_feature_importance(type="Interaction")
+        inter_pretty = [
+            {"feat1": _name(int(i)), "feat2": _name(int(j)), "score": float(score)}
+            for i, j, score in interactions
+        ]
+        inter_pretty.sort(key=lambda item: abs(item["score"]), reverse=True)
+        (output_dir / "feature_interactions.json").write_text(json.dumps(inter_pretty, indent=2))
+    except Exception as e:
+        logging.warning("Could not export CatBoost feature interactions: %s", e)
+
+    if save_model_json:
+        try:
+            model.save_model(str(output_dir / "model.json"), format="json")
+        except Exception as e:
+            logging.warning("Could not export CatBoost model JSON: %s", e)
+
+
 class JsonResultLoggingEncoder(JSONEncoder):
     """JSON converter for objects that are not serializable by default."""
 

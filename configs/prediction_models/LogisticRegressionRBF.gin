@@ -1,0 +1,13 @@
+# Logistic Regression with a Gaussian/RBF kernel feature map.
+#
+# This config reuses the standard LogisticRegression settings and enables
+# the new GaussianRBFKernel transformer so that the linear model operates in
+# the RBF feature space.
+
+include "configs/prediction_models/LogisticRegression.gin"
+
+MLWrapper.kernel = @GaussianRBFKernel()
+GaussianRBFKernel.center_selection = "random"
+GaussianRBFKernel.num_centers = 2048
+GaussianRBFKernel.gamma = None  # Defaults to 1 / n_features
+GaussianRBFKernel.random_state = 0

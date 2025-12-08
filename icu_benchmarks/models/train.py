@@ -18,7 +18,16 @@ from icu_benchmarks.models.utils import save_config_file, JSONMetricsLogger
 from icu_benchmarks.contants import RunMode
 from icu_benchmarks.data.constants import DataSplit as Split
 from ignite.contrib.metrics import AveragePrecision, ROC_AUC
-from sklearn.metrics import log_loss, mean_squared_error, roc_auc_score, accuracy_score, precision_recall_curve, balanced_accuracy_score
+from sklearn.metrics import (
+    log_loss,
+    mean_squared_error,
+    roc_auc_score,
+    accuracy_score,
+    precision_recall_curve,
+    balanced_accuracy_score,
+    average_precision_score,
+    r2_score,
+)
 import pdb
 from loguru import logger
 
@@ -353,9 +362,25 @@ def train_common(
         acc_fn = accuracy_score
         bacc_fn = balanced_accuracy_score
 
+        auc_value = auc_fn(test_label, test_pred)
+        pr_value = (
+            average_precision_score(test_label, test_pred)
+            if len(np.unique(test_label)) > 1
+            else float("nan")
+        )
+        r2_value = (
+            r2_score(test_label, test_pred)
+            if len(np.unique(test_label)) > 1
+            else float("nan")
+        )
+
         fold_metrics['ACC_TEST'] = acc_fn(test_label, test_pred>thresh)
         fold_metrics['BACC_TEST'] = bacc_fn(test_label, test_pred>thresh)
-        fold_metrics['AUC_TEST'] = auc_fn(test_label, test_pred)
+        fold_metrics['AUC_TEST'] = auc_value
+        fold_metrics['loss'] = test_loss
+        fold_metrics['AUC'] = auc_value
+        fold_metrics['PR'] = pr_value
+        fold_metrics['R2'] = r2_value
 
         vals, cnts = np.unique(test_sex, return_counts=True) 
 
