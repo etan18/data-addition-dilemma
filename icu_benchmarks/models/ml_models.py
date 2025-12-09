@@ -3,6 +3,7 @@ import lightgbm as lgbm
 import numpy as np
 import wandb
 from pathlib import Path
+from typing import Optional
 from catboost import CatBoostClassifier as CatBoostModel, Pool
 from sklearn import linear_model
 from sklearn import ensemble
@@ -12,6 +13,7 @@ from icu_benchmarks.models.wrappers import MLWrapper
 from icu_benchmarks.contants import RunMode
 from icu_benchmarks.models.utils import export_catboost_feature_artifacts
 from wandb.integration.lightgbm import wandb_callback
+from defensive_forecasting.k29_algorithm import K29
 
 
 class LGBMWrapper(MLWrapper):
@@ -106,6 +108,70 @@ class CatBoostClassifier(MLWrapper):
                 artifact_dir,
                 save_model_json=self.save_catboost_model_json,
             )
+
+
+@gin.configurable
+class K29Classifier(MLWrapper):
+    _supported_run_modes = [RunMode.classification]
+
+    def __init__(
+        self,
+        *args,
+        n_rff_features: int = 100,
+        gamma: float = 1.0,
+        random_state: int = None,
+        categorical_index: Optional[int] = -1,
+        **kwargs,
+    ):
+        self.categorical_index = categorical_index
+        self.n_rff_features = int(n_rff_features)
+        if self.n_rff_features < 1:
+            raise ValueError("n_rff_features must be at least 1.")
+        self.model = K29(
+            n_rff_features=self.n_rff_features,
+            gamma=gamma,
+            random_state=random_state,
+        )
+        super().__init__(*args, **kwargs)
+
+    def _prepare_features(self, features):
+        """Move the configured categorical column to the last position for K29."""
+        if self.categorical_index is None:
+            return np.asarray(features)
+
+        arr = np.asarray(features)
+        cat_idx = self.categorical_index if self.categorical_index >= 0 else arr.shape[-1] + self.categorical_index
+        if cat_idx < 0 or cat_idx >= arr.shape[-1]:
+            raise ValueError(f"categorical_index {self.categorical_index} out of bounds for input with shape {arr.shape}.")
+
+        if arr.ndim == 1:
+            if cat_idx == arr.shape[0] - 1:
+                return arr
+            categorical = np.array([arr[cat_idx]])
+            continuous = np.delete(arr, cat_idx, axis=0)
+            return np.concatenate([continuous, categorical], axis=0)
+
+        if cat_idx == arr.shape[1] - 1:
+            return arr
+
+        categorical = arr[:, cat_idx][:, None]
+        continuous = np.delete(arr, cat_idx, axis=1)
+        return np.concatenate([continuous, categorical], axis=1)
+
+    def fit_model(self, train_data, train_labels, val_data, val_labels):
+        prepared_train = self._prepare_features(train_data)
+        self.model.fit(prepared_train, train_labels)
+        val_pred = self.predict(val_data)
+        return self.loss(val_labels, val_pred)
+
+    def predict(self, features):
+        prepared_features = self._prepare_features(features)
+        positive_prob = np.asarray(self.model.predict(prepared_features), dtype=float)
+        if positive_prob.ndim == 0:
+            positive_prob = np.array([positive_prob])
+        negative_prob = 1.0 - positive_prob
+        stacked = np.vstack([negative_prob, positive_prob]).T
+        return stacked
 
 
 # Scikit-learn models

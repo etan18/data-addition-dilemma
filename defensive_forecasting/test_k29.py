@@ -1,5 +1,6 @@
 import numpy as np
 from k29_algorithm import K29, binary_search
+from icu_benchmarks.models.ml_models import K29Classifier
 
 
 def test_binary_search():
@@ -211,6 +212,23 @@ def test_k29_edge_cases():
     print("All edge case tests passed!\n")
 
 
+def test_k29_wrapper_probability_shape():
+    """Ensure the ICU benchmarks wrapper exposes well-formed probabilities."""
+    rng = np.random.default_rng(123)
+    z = rng.normal(size=(20, 2))
+    g = rng.integers(0, 2, size=(20, 1))
+    X = np.hstack([z, g])
+    y = (z[:, 0] > 0).astype(float)
+
+    wrapper = K29Classifier(n_rff_features=8, gamma=1.0, categorical_index=-1)
+    val_loss = wrapper.fit_model(X, y, X, y)
+    preds = wrapper.predict(X)
+
+    assert preds.shape == (20, 2)
+    assert np.all(preds >= 0) and np.all(preds <= 1)
+    assert np.isfinite(val_loss)
+
+
 def run_all_tests():
     """Run all test suites."""
     print("=" * 60)
@@ -225,6 +243,7 @@ def run_all_tests():
         test_k29_single_prediction()
         test_k29_online_learning()
         test_k29_edge_cases()
+        test_k29_wrapper_probability_shape()
         
         print("=" * 60)
         print("All tests passed! ✓")

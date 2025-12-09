@@ -30,8 +30,6 @@ def binary_search(f, low=0, high=1, tol=1e-3):
             high = mid
 
 
-
-
 class K29:
     """
     K29 algorithm implementation with Random Fourier Features and categorical features.
@@ -52,6 +50,7 @@ class K29:
         self.history_g = []  # Categorical features (last dimension)
         self.history_p = []  # Predictions
         self.history_y = []  # Labels
+        self.history_rff_z = []  # Cached RFF features for continuous part
         
         # RFF transformer
         self.rff = None
@@ -151,6 +150,7 @@ class K29:
         self.history_g = []
         self.history_p = []
         self.history_y = []
+        self.history_rff_z = []
         
         # Process data sequentially
         for i in range(n):
@@ -170,12 +170,15 @@ class K29:
             else:
                 # Make prediction using current history
                 p_i = self.predict(X[i])
+
+            rff_z_i = self.rff.transform(z_i.reshape(1, -1))[0]
             
             # Store in history
             self.history_z.append(z_i)
             self.history_g.append(g_i)
             self.history_p.append(p_i)
             self.history_y.append(y[i])
+            self.history_rff_z.append(rff_z_i)
         
         self.fitted_ = True
         return self
@@ -203,6 +206,22 @@ class K29:
         
         for x in X:
             z, g = self._split_features(x)
+            g_val = g.item() if isinstance(g, np.ndarray) else g
+            rff_z = self.rff.transform(z.reshape(1, -1))[0]
+            history_len = len(self.history_z)
+            
+            if history_len:
+                history_rff = np.vstack(self.history_rff_z)
+                history_p = np.asarray(self.history_p, dtype=float)
+                history_y = np.asarray(self.history_y, dtype=float)
+                residuals = history_y - history_p
+                history_g = np.asarray(self.history_g, dtype=object)
+                categorical_factors = np.where(history_g == g_val, 2.0, 1.0).astype(float)
+                rff_dot_history = history_rff @ rff_z
+            else:
+                history_p = history_y = residuals = rff_dot_history = categorical_factors = None
+            
+            rff_self = np.dot(rff_z, rff_z)
             
             # Compute potential function S_t(p)
             def potential(p):
@@ -211,16 +230,16 @@ class K29:
                          + (1/2) * k((z_t, p), (z_t, p)) * (1 - 2p)
                 """
                 s = 0.0
-                # Sum over history
-                for i in range(len(self.history_z)):
-                    k_val = self._kernel(z, g, p, self.history_z[i], self.history_g[i], self.history_p[i])
-                    s += k_val * (self.history_y[i] - self.history_p[i])
+                if history_len:
+                    dot_products = rff_dot_history + p * history_p
+                    k_vals = dot_products * categorical_factors
+                    s += np.dot(k_vals, residuals)
                 
-                # Add the self-kernel term
-                k_self = self._kernel(z, g, p, z, g, p)
-                s += 0.5 * k_self * (1 - 2 * p)
+                # Self-kernel term; categorical factor is always 2 when comparing with itself
+                dot_self = rff_self + p * p
+                s += dot_self * (1 - 2 * p)
                 
-                return s
+                return float(s)
             
             # Find p such that S_t(p) = 0
             if potential(1) >= 0:

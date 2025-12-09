@@ -1,0 +1,13 @@
+# Settings for the K29 defensive forecasting classifier.
+
+# Common settings for ML models
+include "configs/prediction_models/common/MLCommon.gin"
+
+# Train params
+train_common.model = @K29Classifier
+
+# Hyperparameter tuning settings
+model/hyperparameter.class_to_tune = @K29Classifier
+model/hyperparameter.n_rff_features = (64, 512)
+model/hyperparameter.gamma = (1e-2, 10.0, "log-uniform")
+model/hyperparameter.categorical_index = -1
