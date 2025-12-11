@@ -1,14 +1,16 @@
 import numpy as np
 from sklearn.kernel_approximation import RBFSampler
+from tqdm import tqdm
 
 
-def binary_search(f, low=0, high=1, tol=1e-3):
+def binary_search(f, low=0, high=1, tol=1e-3, max_iter=100):
     """
     Find a zero of the function f using binary search.
     
     Parameters:
     f (function): The function to find the zero of.
     tol (float): The tolerance for stopping the search. Stops when |f(x)| < tol
+    max_iter (int): Maximum number of iterations to prevent infinite loops
 
     Returns:
     float: The point where the function is zero or (1 + sign(f(0)))/2 if signs do not differ.
@@ -17,7 +19,7 @@ def binary_search(f, low=0, high=1, tol=1e-3):
     if (f0 == f1) and f1 != 0:
         return (1 + f0) / 2
 
-    while True:
+    for _ in range(max_iter):
         mid = (low + high) / 2
         f_mid = f(mid)
         if abs(f_mid) <= tol:
@@ -28,11 +30,15 @@ def binary_search(f, low=0, high=1, tol=1e-3):
             low = mid
         else:
             high = mid
+    
+    # Return midpoint if max_iter reached
+    return (low + high) / 2
 
 
 class K29:
     """
     K29 algorithm implementation with Random Fourier Features and categorical features.
+    Optimized version with improved runtime performance.
     """
     def __init__(self, n_rff_features=100, gamma=1.0, random_state=None):
         """
@@ -45,7 +51,7 @@ class K29:
         self.gamma = gamma
         self.random_state = random_state
         
-        # History storage
+        # History storage - use lists for append efficiency
         self.history_z = []  # Continuous features (d-1 dimensions)
         self.history_g = []  # Categorical features (last dimension)
         self.history_p = []  # Predictions
@@ -79,27 +85,28 @@ class K29:
     
     def _phi(self, z, p):
         """
-        Feature mapping: Phi(z, p) = (RFF(z), p)
+        Feature mapping: Phi(z, p) = (RFF(z), p, 1)
         
         Parameters:
         z (array): Continuous features of shape (d-1,) or (n_samples, d-1)
         p (float or array): Probability predictions
         
         Returns:
-        array: Phi features of shape (n_rff_features + 1,) or (n_samples, n_rff_features + 1)
+        array: Phi features of shape (n_rff_features + 2,) or (n_samples, n_rff_features + 2)
         """
         z = np.asarray(z)
         if z.ndim == 1:
             # Single sample
             rff_z = self.rff.transform(z.reshape(1, -1))[0]
-            return np.concatenate([rff_z, [p]])
+            return np.concatenate([rff_z, [p, 1.0]])
         else:
             # Multiple samples
             rff_z = self.rff.transform(z)
             p_array = np.asarray(p)
             if p_array.ndim == 0:
                 p_array = np.full(len(z), p)
-            return np.column_stack([rff_z, p_array])
+            bias = np.ones(len(z))
+            return np.column_stack([rff_z, p_array, bias])
     
     def _kernel(self, z1, g1, p1, z2, g2, p2):
         """
@@ -144,6 +151,15 @@ class K29:
         assert X.shape[0] == len(y), "X and y must have the same number of samples"
         
         n = X.shape[0]
+
+        if self.random_state is None:
+            permutation = np.random.permutation(n)
+        else:
+            rng = np.random.RandomState(self.random_state)
+            permutation = rng.permutation(n)
+            
+        X = X[permutation]
+        y = y[permutation]
         
         # Initialize history
         self.history_z = []
@@ -153,7 +169,7 @@ class K29:
         self.history_rff_z = []
         
         # Process data sequentially
-        for i in range(n):
+        for i in tqdm(range(n)):
             z_i, g_i = self._split_features(X[i])
             
             if i == 0:
@@ -169,7 +185,7 @@ class K29:
                 self.rff.fit(z_i.reshape(1, -1))
             else:
                 # Make prediction using current history
-                p_i = self.predict(X[i])
+                p_i = self._predict_single(z_i, g_i)
 
             rff_z_i = self.rff.transform(z_i.reshape(1, -1))[0]
             
@@ -182,6 +198,73 @@ class K29:
         
         self.fitted_ = True
         return self
+    
+    def _predict_single(self, z, g):
+        """
+        Make prediction on a single data point (optimized version).
+        
+        Parameters:
+        z: Continuous features
+        g: Categorical feature
+        
+        Returns:
+        float: Predicted probability
+        """
+        g_val = g.item() if isinstance(g, np.ndarray) else g
+        rff_z = self.rff.transform(z.reshape(1, -1))[0]
+        history_len = len(self.history_z)
+        
+        # Precompute history arrays once
+        if history_len > 0:
+            # Convert to numpy arrays once
+            history_rff = np.array(self.history_rff_z)
+            history_p = np.array(self.history_p, dtype=np.float64)
+            history_y = np.array(self.history_y, dtype=np.float64)
+            residuals = history_y - history_p
+            
+            # Precompute categorical factors
+            categorical_factors = np.empty(history_len, dtype=np.float64)
+            for idx in range(history_len):
+                categorical_factors[idx] = 2.0 if self.history_g[idx] == g_val else 1.0
+            
+            # Precompute RFF dot products (doesn't depend on p)
+            rff_dot_history = history_rff @ rff_z  # Shape: (history_len,)
+        else:
+            history_p = history_y = residuals = rff_dot_history = categorical_factors = None
+        
+        # Precompute self RFF dot product
+        rff_self = np.dot(rff_z, rff_z)
+        
+        # Compute potential function S_t(p)
+        def potential(p):
+            """
+            S_t(p) = sum_{i=1}^{t-1} k((z_t, p), (z_i, p_i)) * (y_i - p_i)
+                     + (1/2) * k((z_t, p), (z_t, p)) * (1 - 2p)
+            """
+            s = 0.0
+            if history_len > 0:
+                # Vectorized computation: dot_products = rff_dot + p * p_history + bias_term
+                dot_products = rff_dot_history + p * history_p + 1.0
+                k_vals = dot_products * categorical_factors
+                s += np.dot(k_vals, residuals)
+            
+            # Self-kernel term; categorical factor is always 2 when comparing with itself
+            dot_self = rff_self + p * p + 1.0
+            s += dot_self * (1 - 2 * p)
+            
+            return s
+        
+        # Early exit checks to avoid binary search when possible
+        pot_1 = potential(1.0)
+        if pot_1 >= 0:
+            return 1.0
+        
+        pot_0 = potential(0.0)
+        if pot_0 <= 0:
+            return 0.0
+        
+        # Find p such that S_t(p) = 0
+        return binary_search(potential)
     
     def predict(self, X):
         """
@@ -200,58 +283,13 @@ class K29:
         single_sample = X.ndim == 1
         
         if single_sample:
-            X = X.reshape(1, -1)
+            z, g = self._split_features(X)
+            return self._predict_single(z, g)
         
+        # Multiple samples
         predictions = []
-        
         for x in X:
             z, g = self._split_features(x)
-            g_val = g.item() if isinstance(g, np.ndarray) else g
-            rff_z = self.rff.transform(z.reshape(1, -1))[0]
-            history_len = len(self.history_z)
-            
-            if history_len:
-                history_rff = np.vstack(self.history_rff_z)
-                history_p = np.asarray(self.history_p, dtype=float)
-                history_y = np.asarray(self.history_y, dtype=float)
-                residuals = history_y - history_p
-                history_g = np.asarray(self.history_g, dtype=object)
-                categorical_factors = np.where(history_g == g_val, 2.0, 1.0).astype(float)
-                rff_dot_history = history_rff @ rff_z
-            else:
-                history_p = history_y = residuals = rff_dot_history = categorical_factors = None
-            
-            rff_self = np.dot(rff_z, rff_z)
-            
-            # Compute potential function S_t(p)
-            def potential(p):
-                """
-                S_t(p) = sum_{i=1}^{t-1} k((z_t, p), (z_i, p_i)) * (y_i - p_i)
-                         + (1/2) * k((z_t, p), (z_t, p)) * (1 - 2p)
-                """
-                s = 0.0
-                if history_len:
-                    dot_products = rff_dot_history + p * history_p
-                    k_vals = dot_products * categorical_factors
-                    s += np.dot(k_vals, residuals)
-                
-                # Self-kernel term; categorical factor is always 2 when comparing with itself
-                dot_self = rff_self + p * p
-                s += dot_self * (1 - 2 * p)
-                
-                return float(s)
-            
-            # Find p such that S_t(p) = 0
-            if potential(1) >= 0:
-                pred = 1.0
-            elif potential(0) <= 0:
-                pred = 0.0
-            else:
-                pred = binary_search(potential)
-            
-            predictions.append(pred)
+            predictions.append(self._predict_single(z, g))
         
-        if single_sample:
-            return predictions[0]
-        else:
-            return np.array(predictions)
+        return np.array(predictions)
