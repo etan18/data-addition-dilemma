@@ -50,13 +50,9 @@ class K29:
         self.n_rff_features = n_rff_features
         self.gamma = gamma
         self.random_state = random_state
-        
-        # History storage - use lists for append efficiency
-        self.history_z = []  # Continuous features (d-1 dimensions)
-        self.history_g = []  # Categorical features (last dimension)
-        self.history_p = []  # Predictions
-        self.history_y = []  # Labels
-        self.history_rff_z = []  # Cached RFF features for continuous part
+
+        self.theta = None
+        self.theta_by_g = None
         
         # RFF transformer
         self.rff = None
@@ -82,57 +78,6 @@ class K29:
             z = X[:, :-1]
             g = X[:, -1]
         return z, g
-    
-    def _phi(self, z, p):
-        """
-        Feature mapping: Phi(z, p) = (RFF(z), p, 1)
-        
-        Parameters:
-        z (array): Continuous features of shape (d-1,) or (n_samples, d-1)
-        p (float or array): Probability predictions
-        
-        Returns:
-        array: Phi features of shape (n_rff_features + 2,) or (n_samples, n_rff_features + 2)
-        """
-        z = np.asarray(z)
-        if z.ndim == 1:
-            # Single sample
-            rff_z = self.rff.transform(z.reshape(1, -1))[0]
-            return np.concatenate([rff_z, [p, 1.0]])
-        else:
-            # Multiple samples
-            rff_z = self.rff.transform(z)
-            p_array = np.asarray(p)
-            if p_array.ndim == 0:
-                p_array = np.full(len(z), p)
-            bias = np.ones(len(z))
-            return np.column_stack([rff_z, p_array, bias])
-    
-    def _kernel(self, z1, g1, p1, z2, g2, p2):
-        """
-        Kernel function: k((z,g,p), (z',g',p')) = <Phi(z,p), Phi(z',p')> * (1{g=g'} + 1)
-        
-        Parameters:
-        z1, z2: Continuous features
-        g1, g2: Categorical features
-        p1, p2: Probability predictions
-        
-        Returns:
-        float: Kernel value
-        """
-        phi1 = self._phi(z1, p1)
-        phi2 = self._phi(z2, p2)
-        
-        # Dot product of Phi features
-        dot_product = np.dot(phi1, phi2)
-        
-        # Categorical factor: 2 if g1 == g2, else 1
-        # Handle numpy array comparisons
-        g1_val = g1.item() if isinstance(g1, np.ndarray) else g1
-        g2_val = g2.item() if isinstance(g2, np.ndarray) else g2
-        categorical_factor = 2.0 if g1_val == g2_val else 1.0
-        
-        return dot_product * categorical_factor
     
     def fit(self, X, y):
         """
@@ -160,13 +105,9 @@ class K29:
             
         X = X[permutation]
         y = y[permutation]
-        
-        # Initialize history
-        self.history_z = []
-        self.history_g = []
-        self.history_p = []
-        self.history_y = []
-        self.history_rff_z = []
+    
+        self.theta = None
+        self.theta_by_g = {}
         
         # Process data sequentially
         for i in tqdm(range(n)):
@@ -188,82 +129,70 @@ class K29:
                 p_i = self._predict_single(z_i, g_i)
 
             rff_z_i = self.rff.transform(z_i.reshape(1, -1))[0]
-            
-            # Store in history
-            self.history_z.append(z_i)
-            self.history_g.append(g_i)
-            self.history_p.append(p_i)
-            self.history_y.append(y[i])
-            self.history_rff_z.append(rff_z_i)
+
+            # Update theta caches
+            # Phi(z_i, p_i) = (rff_z_i, p_i, 1)
+            if self.theta is None:
+                d = rff_z_i.shape[0] + 2
+                self.theta = np.zeros(d, dtype=np.float64)
+                if self.theta_by_g is None:
+                    self.theta_by_g = {}
+
+            gi_val = g_i.item() if isinstance(g_i, np.ndarray) else g_i
+            resid = float(y[i]) - float(p_i)
+
+            # Global Theta update
+            self.theta[:-2] += rff_z_i * resid
+            self.theta[-2]  += float(p_i) * resid
+            self.theta[-1]  += 1.0 * resid
+
+            # Per-g Theta update
+            theta_g = self.theta_by_g.get(gi_val)
+            if theta_g is None:
+                theta_g = np.zeros_like(self.theta)
+                self.theta_by_g[gi_val] = theta_g
+
+            theta_g[:-2] += rff_z_i * resid
+            theta_g[-2]  += float(p_i) * resid
+            theta_g[-1]  += 1.0 * resid
         
         self.fitted_ = True
         return self
     
     def _predict_single(self, z, g):
-        """
-        Make prediction on a single data point (optimized version).
-        
-        Parameters:
-        z: Continuous features
-        g: Categorical feature
-        
-        Returns:
-        float: Predicted probability
-        """
         g_val = g.item() if isinstance(g, np.ndarray) else g
         rff_z = self.rff.transform(z.reshape(1, -1))[0]
-        history_len = len(self.history_z)
-        
-        # Precompute history arrays once
-        if history_len > 0:
-            # Convert to numpy arrays once
-            history_rff = np.array(self.history_rff_z)
-            history_p = np.array(self.history_p, dtype=np.float64)
-            history_y = np.array(self.history_y, dtype=np.float64)
-            residuals = history_y - history_p
-            
-            # Precompute categorical factors
-            categorical_factors = np.empty(history_len, dtype=np.float64)
-            for idx in range(history_len):
-                categorical_factors[idx] = 2.0 if self.history_g[idx] == g_val else 1.0
-            
-            # Precompute RFF dot products (doesn't depend on p)
-            rff_dot_history = history_rff @ rff_z  # Shape: (history_len,)
-        else:
-            history_p = history_y = residuals = rff_dot_history = categorical_factors = None
-        
-        # Precompute self RFF dot product
-        rff_self = np.dot(rff_z, rff_z)
-        
-        # Compute potential function S_t(p)
+        rff_self = float(np.dot(rff_z, rff_z))
+
+        # Grab caches (should exist after fit; keep fallback if you want)
+        if self.theta is None:
+            d = rff_z.shape[0] + 2
+            self.theta = np.zeros(d, dtype=np.float64)
+            if self.theta_by_g is None:
+                self.theta_by_g = {}
+
+        t = self.theta
+        tg = self.theta_by_g.get(g_val)
+        if tg is None:
+            tg = np.zeros_like(t)
+
+        # Precompute history-term coefficients:
+        # history(p) = A + B*p + C
+        A = float(np.dot(rff_z, t[:-2]) + np.dot(rff_z, tg[:-2]))
+        B = float(t[-2] + tg[-2])
+        C = float(t[-1] + tg[-1])
+
         def potential(p):
-            """
-            S_t(p) = sum_{i=1}^{t-1} k((z_t, p), (z_i, p_i)) * (y_i - p_i)
-                     + (1/2) * k((z_t, p), (z_t, p)) * (1 - 2p)
-            """
-            s = 0.0
-            if history_len > 0:
-                # Vectorized computation: dot_products = rff_dot + p * p_history + bias_term
-                dot_products = rff_dot_history + p * history_p + 1.0
-                k_vals = dot_products * categorical_factors
-                s += np.dot(k_vals, residuals)
-            
-            # Self-kernel term; categorical factor is always 2 when comparing with itself
-            dot_self = rff_self + p * p + 1.0
-            s += dot_self * (1 - 2 * p)
-            
+            # History term
+            s = A + B * p + C
+            # Self term: (||rff||^2 + p^2 + 1) * (1 - 2p)
+            s += (rff_self + p * p + 1.0) * (1.0 - 2.0 * p)
             return s
-        
-        # Early exit checks to avoid binary search when possible
-        pot_1 = potential(1.0)
-        if pot_1 >= 0:
+
+        if potential(1.0) >= 0:
             return 1.0
-        
-        pot_0 = potential(0.0)
-        if pot_0 <= 0:
+        if potential(0.0) <= 0:
             return 0.0
-        
-        # Find p such that S_t(p) = 0
         return binary_search(potential)
     
     def predict(self, X):
