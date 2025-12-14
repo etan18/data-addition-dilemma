@@ -8,6 +8,8 @@ Specifically:
 - [data-addition-scripts](data-addition-scripts): contains scripts for running experiments for different data composition
 - [icu_benchmarks](icu_benchmarks): contains modified files preprocessing and training.
 - [fairness](fairness): contains notebooks for analyzing and parsing YAIB outputs by subgroup (race or gender)
+- [defensive_forecasting](defensive_forecasting): implementation of the K29 algorithm and analysis of K29 experiment results
+  - To use K29 or any K29 scripts, be sure to run `pip install -e .` in this repository to build the module.
 
 ### Changelog 
 ________
