@@ -45,7 +45,7 @@ def execute_repeated_cv(
     hospital_id_test = None, 
     save_data=False, 
     max_train=None, 
-    addition_cap=False, 
+    addition_cap=None, 
     subgroup=None,
 ) -> float:
     """Preprocesses data and trains a model for each fold.

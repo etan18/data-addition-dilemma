@@ -29,7 +29,9 @@ uv run --python 3.11 python -m icu_benchmarks.run \
   -m "${MODEL}" \
   -hi "${JOINED}" \
   -hit "${TEST_HOSPITAL}" \
-  # --max_train "${MAX_TRAIN_PER_HOSPITAL}" \
   --tune \
   -l "${LOG_DIR}" \
   -ls "_k29_tune"
+
+# Optional: cap per-hospital training samples to speed up tuning.
+#   --max_train "${MAX_TRAIN_PER_HOSPITAL}" \

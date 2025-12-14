@@ -73,8 +73,8 @@ def choose_and_bind_hyperparameters(
 
     # Collect hyperparameters.
     hyperparams_bounds, hyperparams_names = collect_bound_hyperparameters(hyperparams, scopes)
-    if do_tune and not hyperparams_bounds:
-        logging.info("No hyperparameters to tune, skipping tuning.")
+    if not hyperparams_bounds:
+        logging.info("No hyperparameters to tune (all hyperparameters already bound), skipping tuning.")
         return
 
     # Attempt checkpoint loading

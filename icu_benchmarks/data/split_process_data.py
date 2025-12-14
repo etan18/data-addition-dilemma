@@ -107,9 +107,9 @@ def preprocess_data(
     max_test = 400
     # default if no addition cap specified
     if addition_cap is not None: 
-        max_per_hospital = int(addition_cap/0.9)
+        max_per_hospital = min(int(addition_cap/0.9), 1000)
     else: 
-        max_per_hospital = 1666 #1500/0.9 since 0.9 of the total data is used for train 
+        max_per_hospital = 1000
     # filter by hospital id
     if hospital_id: 
         hospital_patient_df = pd.read_csv(os.path.join(data_dir, "patient_hospital.csv"))
@@ -134,13 +134,31 @@ def preprocess_data(
                 # filter tv_data by patients in test hospital 
                 selected = df[df["stay_id"].isin(test_patient_list)]
 
-                # select 400 patients in test hospital as test set                
-                pos_class = False
-                while pos_class == False: 
-                    df_test = selected.sample(n=max_test)
-                    tot_pos = df[df["stay_id"].isin(df_test['stay_id'])]['label'].sum()
-                    pos_class = tot_pos > 1 
-                                    
+                # select up to 400 patients in test hospital as test set                
+                sample_size = min(max_test, len(selected))
+                positives = selected[selected["label"] == 1]
+                negatives = selected[selected["label"] == 0]
+
+                if sample_size == 0:
+                    logging.warning(f"No patients found for hospital {hospital_id_test}; skipping split.")
+                    df_test = selected
+                elif len(positives) >= 2:
+                    pos_sample = positives.sample(n=min(len(positives), 2))
+                    remaining = sample_size - len(pos_sample)
+                    pool = selected.drop(pos_sample.index)
+                    df_test = pd.concat(
+                        [pos_sample, pool.sample(n=remaining, replace=len(pool) < remaining)] if remaining > 0 else [pos_sample]
+                    )
+                elif len(positives) == 1:
+                    logging.warning(f"Only one positive case available in hospital {hospital_id_test}; using it in test split.")
+                    remaining = sample_size - 1
+                    df_test = pd.concat(
+                        [positives, negatives.sample(n=remaining, replace=len(negatives) < remaining)] if remaining > 0 else [positives]
+                    )
+                else:
+                    logging.warning(f"No positive cases available in hospital {hospital_id_test}; sampling without class constraint.")
+                    df_test = selected.sample(n=sample_size, replace=len(selected) < sample_size)
+
                 df_train_val = selected.drop(df_test.index)
                     
                 for key in tv_data.keys(): 
@@ -256,10 +274,23 @@ def preprocess_data(
                 df = tv_data[key]
                 tv_data[key] = df[df["stay_id"].isin(patient_list)]
             logging.info(f"train/test on hospital(s) {hospital_id}: with {tv_data[key].shape[0]} patients") 
-                          
+    
     # Generate the splits
     logging.info("Generating splits.")
-    if not complete_train:
+    if ts_data is not None:
+        # Always respect a predefined test split (e.g., fixed test hospital) regardless of complete_train.
+        effective_train_size = train_size if train_size is not None else (0.9 if complete_train else 0.8)
+        tv_data = make_train_test(
+            tv_data,
+            ts_data,
+            vars,
+            train_size=effective_train_size,
+            test_size=1,
+            seed=seed,
+            runmode=runmode,
+            max_train=max_train,
+        )
+    elif not complete_train:
         tv_data = make_single_split(
             tv_data,
             vars,
@@ -275,12 +306,7 @@ def preprocess_data(
         )
     else:
         # If full train is set, we use all data for training/validation
-        if ts_data: 
-            # we have a specified dataset that is outside of the current set
-            tv_data = make_train_test(tv_data, ts_data, vars, train_size=0.9, test_size=0.8, seed=seed, runmode=runmode, max_train=max_train)
-            
-        else: 
-            tv_data = make_train_val(tv_data, vars, train_size=0.9, seed=seed, debug=debug, runmode=runmode, max_train=max_train)
+        tv_data = make_train_val(tv_data, vars, train_size=0.9, seed=seed, debug=debug, runmode=runmode, max_train=max_train)
 
     # Apply preprocessing
     tv_data = preprocessor.apply(tv_data, vars)
