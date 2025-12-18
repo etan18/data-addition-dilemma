@@ -40,16 +40,18 @@ class K29:
     K29 algorithm implementation with Random Fourier Features and categorical features.
     Optimized version with improved runtime performance.
     """
-    def __init__(self, n_rff_features=100, gamma=1.0, random_state=None):
+    def __init__(self, n_rff_features=100, gamma=1.0, random_state=None, test_hospital_id=None):
         """
         Parameters:
         n_rff_features (int): Number of Random Fourier Features to use
         gamma (float): RBF kernel parameter for RFF
         random_state (int): Random seed for reproducibility
+        test_hospital_id: Optional categorical id to process first during fit
         """
         self.n_rff_features = n_rff_features
         self.gamma = gamma
         self.random_state = random_state
+        self.test_hospital_id = test_hospital_id
 
         self.theta = None
         self.theta_by_g = None
@@ -97,12 +99,19 @@ class K29:
         
         n = X.shape[0]
 
-        if self.random_state is None:
-            permutation = np.random.permutation(n)
-        else:
-            rng = np.random.RandomState(self.random_state)
+        rng = np.random if self.random_state is None else np.random.RandomState(self.random_state)
+
+        if self.test_hospital_id is None:
             permutation = rng.permutation(n)
-            
+        else:
+            # Process the held-out hospital first, then a shuffled remainder
+            _, g_all = self._split_features(X)
+            mask = g_all == self.test_hospital_id
+            test_indices = np.nonzero(mask)[0]
+            other_indices = np.nonzero(~mask)[0]
+            rng.shuffle(other_indices)
+            permutation = np.concatenate([test_indices, other_indices])
+
         X = X[permutation]
         y = y[permutation]
     

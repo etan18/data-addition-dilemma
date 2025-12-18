@@ -121,6 +121,7 @@ class K29Classifier(MLWrapper):
         gamma: float = 1.0,
         random_state: int = None,
         categorical_index: Optional[int] = -1,
+        test_hospital_id: Optional = None,
         **kwargs,
     ):
         self.categorical_index = categorical_index
@@ -131,6 +132,7 @@ class K29Classifier(MLWrapper):
             n_rff_features=self.n_rff_features,
             gamma=gamma,
             random_state=random_state,
+            test_hospital_id=test_hospital_id,
         )
         super().__init__(*args, **kwargs)
 
