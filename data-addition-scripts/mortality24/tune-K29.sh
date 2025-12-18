@@ -18,7 +18,8 @@ mapfile -t H_IDS < "${HOSPITAL_LIST_FILE}"
 JOINED="$(printf '%s-' "${H_IDS[@]}")"
 JOINED="${JOINED%-}"
 TEST_HOSPITAL="${H_IDS[4]}"
-# MAX_TRAIN_PER_HOSPITAL=5000
+MAX_TRAIN_PER_HOSPITAL=2000
+# Increase validation share during tuning (0.6 train => 0.4 val).
 
 echo "Tuning ${MODEL} on train hospitals ${JOINED} with test hospital ${TEST_HOSPITAL}" 
 uv run --python 3.11 python -m icu_benchmarks.run \
@@ -30,8 +31,6 @@ uv run --python 3.11 python -m icu_benchmarks.run \
   -hi "${JOINED}" \
   -hit "${TEST_HOSPITAL}" \
   --tune \
+  --addition-cap "${MAX_TRAIN_PER_HOSPITAL}" \
   -l "${LOG_DIR}" \
   -ls "_k29_tune"
-
-# Optional: cap per-hospital training samples to speed up tuning.
-#   --max_train "${MAX_TRAIN_PER_HOSPITAL}" \
