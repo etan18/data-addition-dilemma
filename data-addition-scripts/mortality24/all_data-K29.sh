@@ -1,4 +1,27 @@
 #!/bin/bash
+set -euo pipefail
+
+# Track child PIDs to ensure clean termination
+declare -a PIDS=()
+
+# Clean up any background jobs if the script exits or is interrupted
+cleanup() {
+    echo "[all_data-K29] Cleaning up background jobs..."
+    # Terminate tracked PIDs and their process groups
+    for pid in "${PIDS[@]}"; do
+        [[ -z "${pid}" ]] && continue
+        # First try graceful termination
+        kill -TERM "${pid}" 2>/dev/null || true
+        # Also attempt killing the whole process group if supported
+        kill -TERM -- -"${pid}" 2>/dev/null || true
+    done
+    sleep 2
+    for pid in "${PIDS[@]}"; do
+        kill -KILL "${pid}" 2>/dev/null || true
+        kill -KILL -- -"${pid}" 2>/dev/null || true
+    done
+}
+trap cleanup EXIT INT TERM
 
 hospital_ids=()
 while IFS= read -r line; do
@@ -12,81 +35,25 @@ printf -v joined '%s-' "${hospital_ids_subset[@]}"
 joined="${joined%-}"
 
 # Parallelism settings
-JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
+JOBS="${JOBS:-$(nproc 2>/dev/null || echo 8)}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}" MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}" NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}"
-# Limit visible GPUs so Lightning stays single-device and doesn't spawn DDP workers.
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2}"
-export YAIB_TRAINER_DEVICES="${YAIB_TRAINER_DEVICES:-3}"
+# Hide GPUs entirely for CPU-only runs to prevent accidental CUDA contexts
+export CUDA_VISIBLE_DEVICES=""
+# Force CPU so frameworks don't attempt CUDA
+export PYTORCH_NO_CUDA="1"
+# Ensure single device when running on CPU
+export YAIB_TRAINER_DEVICES="${YAIB_TRAINER_DEVICES:-1}"
 
 # Base directory for logs (matches -l in tune-K29.sh)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_BASE="${LOG_BASE:-${SCRIPT_DIR}/../../yaib_logs}"
-
-# Set this to the run directory produced by tune-K29.sh (contains hyperparameter_tuning_logs.json).
-# If unset, we will pick the most recent tuning run automatically.
-# TUNING_RUN_DIR="${TUNING_RUN_DIR:-""}"
-
-# if [[ -z "${TUNING_RUN_DIR}" ]]; then
-#     TUNING_RUN_DIR="$(LOG_BASE="${LOG_BASE}" uv run python - <<'PY'
-# import os, glob
-# base = os.path.abspath(os.environ.get("LOG_BASE", "."))
-# paths = glob.glob(os.path.join(base, "**", "hyperparameter_tuning_logs.json"), recursive=True)
-# # Prefer runs containing K29 and tune in their path
-# paths = sorted(paths, key=lambda p: os.path.getmtime(p), reverse=True)
-# for path in paths:
-#     lower = path.lower()
-#     if "k29" in lower and "tune" in lower:
-#         print(os.path.dirname(path))
-#         break
-# else:
-#     # fallback to most recent irrespective of name
-#     if paths:
-#         print(os.path.dirname(paths[0]))
-# PY
-# )"
-# fi
-
-# if [[ -z "${TUNING_RUN_DIR}" ]]; then
-#     echo "Could not auto-detect TUNING_RUN_DIR; please export TUNING_RUN_DIR manually."
-#     exit 1
-# fi
-
-# readarray -t BEST_HP < <(TUNING_RUN_DIR="${TUNING_RUN_DIR}" uv run python - <<'PY'
-# import json, os, sys, math
-# run_dir = os.environ.get("TUNING_RUN_DIR")
-# path = os.path.join(run_dir, "hyperparameter_tuning_logs.json")
-# if not os.path.isfile(path):
-#     sys.exit(f"hyperparameter_tuning_logs.json not found at {path}")
-# with open(path) as f:
-#     data = json.load(f)
-# x_iters = data.get("x_iters", [])
-# func_vals = data.get("func_vals", [])
-# if not x_iters or not func_vals:
-#     sys.exit("No tuning history found in hyperparameter_tuning_logs.json")
-# best_idx = min(range(len(func_vals)), key=lambda i: func_vals[i])
-# best = x_iters[best_idx]
-# # Order matches K29.gin bounds: n_rff_features, gamma, categorical_index
-# keys = ["model/hyperparameter.n_rff_features", "model/hyperparameter.gamma", "model/hyperparameter.categorical_index"]
-# for k, v in zip(keys, best):
-#     # Print as key=value for easy capture
-#     print(f"{k}={v}")
-# PY
-# )
-
-# if [[ ${#BEST_HP[@]} -lt 2 ]]; then
-#     echo "Failed to load tuned hyperparameters from ${TUNING_RUN_DIR}"
-#     exit 1
-# fi
-
-# echo "Using tuned hyperparameters from ${TUNING_RUN_DIR}:"
-# printf '  %s\n' "${BEST_HP[@]}"
 
 run_hospital() {
     local hospital1="$1"
     echo "Training model for hospital ID: $hospital1 testing for hospital $hospital1"
 
     # Call the CLI via the module to force uv to use the project env (avoids missing binary on PATH)
-   PATH="$PWD/.venv/bin:$PATH" uv run --python 3.11 python -m icu_benchmarks.run \
+    PATH="$PWD/.venv/bin:$PATH" uv run --python 3.11 python -m icu_benchmarks.run \
         -d /home/tane/YAIB/YAIB-cohorts/data/mortality24/eicu \
         -n eicu \
         -t BinaryClassification \
@@ -95,9 +62,7 @@ run_hospital() {
         -hit "$hospital1" \
         --complete-train \
         -m K29 \
-        --cpu \
-        -hp model/hyperparameter.n_rff_features=740 \
-            model/hyperparameter.gamma=0.025
+        --cpu
 }
 
 for hospital1 in "${hospital_ids_subset[@]}"; do
@@ -106,6 +71,7 @@ for hospital1 in "${hospital_ids_subset[@]}"; do
         wait -n
     done
     run_hospital "$hospital1" &
+    PIDS+=("$!")
 done
 
 wait

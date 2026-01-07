@@ -156,7 +156,7 @@ def train_common(
         callbacks=callbacks,
         precision=precision,
         accelerator="auto" if not cpu else "cpu",
-        devices=max(torch.cuda.device_count(), 1),
+        devices=1 if cpu else max(torch.cuda.device_count(), 1),
         deterministic="warn" if reproducible else False,
         benchmark=not reproducible,
         enable_progress_bar=verbose,
