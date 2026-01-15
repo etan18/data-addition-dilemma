@@ -132,7 +132,7 @@ class K29Classifier(MLWrapper):
             n_rff_features=self.n_rff_features,
             gamma=gamma,
             random_state=random_state,
-            test_hospital_id=test_hospital_id,
+            # test_hospital_id=test_hospital_id,
         )
         super().__init__(*args, **kwargs)
 

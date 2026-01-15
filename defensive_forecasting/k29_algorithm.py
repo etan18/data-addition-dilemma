@@ -1,233 +1,240 @@
 import numpy as np
 from sklearn.kernel_approximation import RBFSampler
 from tqdm import tqdm
-
-
-def binary_search(f, low=0, high=1, tol=1e-3, max_iter=100):
-    """
-    Find a zero of the function f using binary search.
-    
-    Parameters:
-    f (function): The function to find the zero of.
-    tol (float): The tolerance for stopping the search. Stops when |f(x)| < tol
-    max_iter (int): Maximum number of iterations to prevent infinite loops
-
-    Returns:
-    float: The point where the function is zero or (1 + sign(f(0)))/2 if signs do not differ.
-    """
-    f0, f1 = np.sign(f(0)), np.sign(f(1))
-    if (f0 == f1) and f1 != 0:
-        return (1 + f0) / 2
-
-    for _ in range(max_iter):
-        mid = (low + high) / 2
-        f_mid = f(mid)
-        if abs(f_mid) <= tol:
-            return mid
-        sign_f_mid = np.sign(f_mid)
-
-        if sign_f_mid == f0:
-            low = mid
-        else:
-            high = mid
-    
-    # Return midpoint if max_iter reached
-    return (low + high) / 2
-
+from catboost import CatBoostClassifier, Pool
+from collections import deque
 
 class K29:
     """
-    K29 algorithm implementation with Random Fourier Features and categorical features.
-    Optimized version with improved runtime performance.
+    Partially-online RFF + CatBoost.
     """
-    def __init__(self, n_rff_features=100, gamma=1.0, random_state=None, test_hospital_id=None):
-        """
-        Parameters:
-        n_rff_features (int): Number of Random Fourier Features to use
-        gamma (float): RBF kernel parameter for RFF
-        random_state (int): Random seed for reproducibility
-        test_hospital_id: Optional categorical id to process first during fit
-        """
-        self.n_rff_features = n_rff_features
-        self.gamma = gamma
+    def __init__(
+        self,
+        n_rff_features=100,
+        gamma=1.0,
+        random_state=None,
+        update_every=250,
+        trees_per_update=100,
+        max_trees=1000,
+        window_size=7000,          # rolling window size for rebuilds
+        use_gpu=False,
+        gpu_devices="4:5",
+        catboost_params=None,
+        float_dtype=np.float32,    # store cached RFFs in float32 by default
+    ):
+        self.n_rff_features = int(n_rff_features)
+        self.gamma = float(gamma)
         self.random_state = random_state
-        self.test_hospital_id = test_hospital_id
 
-        self.theta = None
-        self.theta_by_g = None
-        
-        # RFF transformer
-        self.rff = None
+        self.update_every = int(update_every)
+        self.trees_per_update = int(trees_per_update)
+        self.max_trees = int(max_trees)
+        self.window_size = int(window_size)
+
+        if self.update_every <= 0:
+            raise ValueError("update_every must be > 0")
+        if self.trees_per_update <= 0:
+            raise ValueError("trees_per_update must be > 0")
+        if self.max_trees <= 0:
+            raise ValueError("max_trees must be > 0")
+        if self.window_size <= 0:
+            raise ValueError("window_size must be > 0")
+
+        self.float_dtype = float_dtype
+
+        self.rff = RBFSampler(
+            n_components=self.n_rff_features,
+            gamma=self.gamma,
+            random_state=self.random_state,
+        )
+        self._rff_ready = False
+
+        # CatBoost base params
+        params = dict(
+            loss_function="Logloss",
+            eval_metric="Logloss",
+            learning_rate=0.05,
+            depth=6,
+            l2_leaf_reg=3.0,
+            random_seed=self.random_state,
+            verbose=False,
+            allow_writing_files=False,
+        )
+        if use_gpu:
+            params.update(dict(task_type="GPU", devices=gpu_devices))
+        if catboost_params:
+            params.update(catboost_params)
+        self._cb_base_params = params
+
+        self._cat_feature_idx = [self.n_rff_features]  # last column is categorical g
+
+        self.model = None
         self.fitted_ = False
-        
-    def _split_features(self, X):
+
+        # Update buffer (recent labeled points since last update)
+        self._buf_rff = []
+        self._buf_g = []
+        self._buf_y = []
+        self._buf_pos = 0
+        self._buf_neg = 0
+
+        # Rolling window cache (stores cached RFF so rebuilds don't recompute)
+        self._win_rff = deque(maxlen=self.window_size)
+        self._win_g = deque(maxlen=self.window_size)
+        self._win_y = deque(maxlen=self.window_size)
+
+    def featurize(self, x):
         """
-        Split X into continuous features z and categorical feature g.
-        X has d features: first d-1 are continuous (z), last is categorical (g).
-        
-        Parameters:
-        X (array-like): Features of shape (n_samples, d) or (d,)
-        
-        Returns:
-        z (array): Continuous features of shape (n_samples, d-1) or (d-1,)
-        g (array): Categorical features of shape (n_samples,) or scalar
+        Returns cached features for single datapoint:
+          rff_z: (D,) float_dtype
+          g: int32
         """
-        X = np.asarray(X)
-        if X.ndim == 1:
-            z = X[:-1]
-            g = X[-1]
+        x = np.asarray(x)
+        assert x.ndim == 1, "Expected a single sample x with shape (d,)"
+
+        z = x[:-1]
+        g = x[-1]
+        if isinstance(g, np.ndarray):
+            g = g.item()
+        g = np.int32(g)
+
+        if not self._rff_ready:
+            self.rff.fit(np.asarray(z).reshape(1, -1))
+            self._rff_ready = True
+
+        rff_z = self.rff.transform(np.asarray(z).reshape(1, -1))[0].astype(self.float_dtype, copy=False)
+        return rff_z, g
+
+    def build_pool(self, rff_list, g_list, y_list):
+        """
+        Build CatBoost Pool. We only construct an object matrix at TRAIN time.
+        """
+        R = np.vstack(rff_list)  # (m, D)
+        g = np.asarray(g_list, dtype=np.int32)
+        y = np.asarray(y_list, dtype=np.int32)
+
+        X = np.empty((R.shape[0], R.shape[1] + 1), dtype=object)
+        X[:, :-1] = R
+        X[:, -1] = g
+
+        return Pool(X, y, cat_features=self._cat_feature_idx)
+
+    def rebuild_model(self):
+        """
+        Rebuild a fixed-size (max_trees) model on the rolling window.
+        """
+        if len(self._win_y) < 2:
+            return
+        y_arr = np.asarray(self._win_y, dtype=np.int8)
+        if y_arr.min() == y_arr.max(): # one one label present, skip
+            return
+
+        pool = self.build_pool(list(self._win_rff), list(self._win_g), list(self._win_y))
+        m = CatBoostClassifier(**self._cb_base_params, iterations=self.max_trees)
+        m.fit(pool)
+        self.model = m
+        self.fitted_ = True
+
+    def update(self, force=False):
+        """
+        Every update_every points, train on the buffered chunk.
+
+        - If model size + trees_per_update <= max_trees: extend via init_model on the chunk.
+        - Else: rebuild from scratch with max_trees on the rolling window.
+        """
+        if (not force) and (len(self._buf_y) < self.update_every):
+            return
+        if len(self._buf_y) == 0:
+            return
+
+        # Need both classes in chunk to do an update; otherwise keep buffering.
+        if not (self._buf_pos > 0 and self._buf_neg > 0):
+            return
+
+        # Push chunk into rolling window
+        for rff_z, g, y in zip(self._buf_rff, self._buf_g, self._buf_y):
+            self._win_rff.append(rff_z)
+            self._win_g.append(g)
+            self._win_y.append(y)
+
+        chunk_pool = self.build_pool(self._buf_rff, self._buf_g, self._buf_y)
+
+        if self.model is None:
+            iters = min(self.trees_per_update, self.max_trees)
+            self.model = CatBoostClassifier(**self._cb_base_params, iterations=iters)
+            self.model.fit(chunk_pool)
+            self.fitted_ = True
         else:
-            z = X[:, :-1]
-            g = X[:, -1]
-        return z, g
-    
-    def fit(self, X, y):
+            current = 0 if self.model is None else int(getattr(self.model, "tree_count_", 0))
+            proposed = current + self.trees_per_update
+            if proposed <= self.max_trees:
+                new_model = CatBoostClassifier(**self._cb_base_params, iterations=self.trees_per_update)
+                new_model.fit(chunk_pool, init_model=self.model)
+                self.model = new_model
+                self.fitted_ = True
+            else:
+                self.rebuild_model()
+
+        # clear buffer
+        self._buf_rff.clear()
+        self._buf_g.clear()
+        self._buf_y.clear()
+        self._buf_pos = 0
+        self._buf_neg = 0
+
+    def step(self, x, y=None):
         """
-        Fit the model to the data using online learning.
-        
-        Parameters:
-        X (array-like): n by d matrix where first d-1 columns are continuous, last is categorical
-        y (array-like): array of binary labels in [0,1]
-        
-        Returns:
-        self: Fitted model
+        One streaming step:
+          - compute/cache RFF
+          - predict p
+          - if y provided: buffer label and possibly update
         """
+        rff_z, g = self.featurize(x)
+
+        if not self.fitted_:
+            p = 0.5
+        else:
+            Xrow = np.empty((1, self.n_rff_features + 1), dtype=object)
+            Xrow[0, :-1] = rff_z
+            Xrow[0, -1] = g
+            p = float(self.model.predict_proba(Xrow)[:, 1][0])
+
+        if y is not None:
+            y_i = np.int8(int(y))
+            self._buf_rff.append(rff_z)
+            self._buf_g.append(g)
+            self._buf_y.append(y_i)
+            if y_i == 1:
+                self._buf_pos += 1
+            else:
+                self._buf_neg += 1
+
+            self.update(force=False)
+
+        return p
+
+    def fit(self, X, y, return_preds=False, finalize=True, show_progress=True):
         X = np.asarray(X)
         y = np.asarray(y)
-        
-        assert X.shape[0] == len(y), "X and y must have the same number of samples"
-        
-        n = X.shape[0]
 
-        rng = np.random if self.random_state is None else np.random.RandomState(self.random_state)
+        preds = [] if return_preds else None
+        for i in tqdm(range(len(y))):
+            p = self.step(X[i], y=y[i])
+            if return_preds:
+                preds.append(p)
 
-        if self.test_hospital_id is None:
-            permutation = rng.permutation(n)
-        else:
-            # Process the held-out hospital first, then a shuffled remainder
-            _, g_all = self._split_features(X)
-            mask = g_all == self.test_hospital_id
-            test_indices = np.nonzero(mask)[0]
-            other_indices = np.nonzero(~mask)[0]
-            rng.shuffle(other_indices)
-            permutation = np.concatenate([test_indices, other_indices])
+        if finalize:
+            self.update(force=True)
 
-        X = X[permutation]
-        y = y[permutation]
-    
-        self.theta = None
-        self.theta_by_g = {}
-        
-        # Process data sequentially
-        for i in tqdm(range(n)):
-            z_i, g_i = self._split_features(X[i])
-            
-            if i == 0:
-                # First point: use p = 0.5
-                p_i = 0.5
-                # Initialize RFF on first continuous features
-                # sklearn's RBFSampler uses gamma parameter
-                self.rff = RBFSampler(
-                    n_components=self.n_rff_features,
-                    gamma=self.gamma,
-                    random_state=self.random_state
-                )
-                self.rff.fit(z_i.reshape(1, -1))
-            else:
-                # Make prediction using current history
-                p_i = self._predict_single(z_i, g_i)
-
-            rff_z_i = self.rff.transform(z_i.reshape(1, -1))[0]
-
-            # Update theta caches
-            # Phi(z_i, p_i) = (rff_z_i, p_i, 1)
-            if self.theta is None:
-                d = rff_z_i.shape[0] + 2
-                self.theta = np.zeros(d, dtype=np.float64)
-                if self.theta_by_g is None:
-                    self.theta_by_g = {}
-
-            gi_val = g_i.item() if isinstance(g_i, np.ndarray) else g_i
-            resid = float(y[i]) - float(p_i)
-
-            # Global Theta update
-            self.theta[:-2] += rff_z_i * resid
-            self.theta[-2]  += float(p_i) * resid
-            self.theta[-1]  += 1.0 * resid
-
-            # Per-g Theta update
-            theta_g = self.theta_by_g.get(gi_val)
-            if theta_g is None:
-                theta_g = np.zeros_like(self.theta)
-                self.theta_by_g[gi_val] = theta_g
-
-            theta_g[:-2] += rff_z_i * resid
-            theta_g[-2]  += float(p_i) * resid
-            theta_g[-1]  += 1.0 * resid
-        
-        self.fitted_ = True
+        if return_preds:
+            return self, np.asarray(preds, dtype=float)
         return self
-    
-    def _predict_single(self, z, g):
-        g_val = g.item() if isinstance(g, np.ndarray) else g
-        rff_z = self.rff.transform(z.reshape(1, -1))[0]
-        rff_self = float(np.dot(rff_z, rff_z))
 
-        # Grab caches (should exist after fit; keep fallback if you want)
-        if self.theta is None:
-            d = rff_z.shape[0] + 2
-            self.theta = np.zeros(d, dtype=np.float64)
-            if self.theta_by_g is None:
-                self.theta_by_g = {}
-
-        t = self.theta
-        tg = self.theta_by_g.get(g_val)
-        if tg is None:
-            tg = np.zeros_like(t)
-
-        # Precompute history-term coefficients:
-        # history(p) = A + B*p + C
-        A = float(np.dot(rff_z, t[:-2]) + np.dot(rff_z, tg[:-2]))
-        B = float(t[-2] + tg[-2])
-        C = float(t[-1] + tg[-1])
-
-        def potential(p):
-            # History term
-            s = A + B * p + C
-            # Self term: (||rff||^2 + p^2 + 1) * (1 - 2p)
-            s += (rff_self + p * p + 1.0) * (1.0 - 2.0 * p)
-            return s
-
-        if potential(1.0) >= 0:
-            return 1.0
-        if potential(0.0) <= 0:
-            return 0.0
-        return binary_search(potential)
-    
     def predict(self, X):
-        """
-        Make predictions on new data points.
-        
-        Parameters:
-        X (array-like): Data to predict on, shape (n_samples, d) or (d,)
-        
-        Returns:
-        array or float: Predicted probabilities
-        """
-        if self.rff is None:
-            raise ValueError("Model must be fitted before making predictions.")
-        
         X = np.asarray(X)
-        single_sample = X.ndim == 1
-        
-        if single_sample:
-            z, g = self._split_features(X)
-            return self._predict_single(z, g)
-        
-        # Multiple samples
-        predictions = []
-        for x in X:
-            z, g = self._split_features(x)
-            predictions.append(self._predict_single(z, g))
-        
-        return np.array(predictions)
+        if X.ndim == 1:
+            return self.step(X, y=None)
+        out = np.empty((X.shape[0],), dtype=float)
+        for i in range(X.shape[0]):
+            out[i] = self.step(X[i], y=None)
+        return out

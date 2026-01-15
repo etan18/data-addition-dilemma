@@ -7,7 +7,7 @@ import logging
 import gin
 import pandas as pd
 from recipys.recipe import Recipe
-from recipys.selector import all_numeric_predictors, all_outcomes, has_type, all_of
+from recipys.selector import Selector, all_numeric_predictors, all_outcomes, has_type, all_of
 from recipys.step import (
     StepImputeFastForwardFill,
     StepImputeFastZeroFill,
@@ -131,7 +131,14 @@ class DefaultClassificationPreprocessor(Preprocessor):
         
         sta_rec = Recipe(data[Split.train][Segment.static], [], vars[Segment.static])
         if self.scaling:
-            sta_rec.add_step(StepSklearn(StandardScaler(), sel=all_numeric_predictors()))
+            # Exclude hospitalid from scaling so it stays as a categorical identifier.
+            numeric_static = [name for name in vars[Segment.static] if name != "hospitalid"]
+            numeric_no_hospital = Selector(
+                description="numeric static without hospitalid",
+                names=numeric_static,
+                types=["int16", "int32", "int64", "float16", "float32", "float64"],
+            )
+            sta_rec.add_step(StepSklearn(StandardScaler(), sel=numeric_no_hospital))
 
         sta_rec.add_step(StepImputeFastZeroFill(sel=all_numeric_predictors()))
         sta_rec.add_step(StepSklearn(SimpleImputer(missing_values=None, strategy="most_frequent"), sel=has_type("object")))
