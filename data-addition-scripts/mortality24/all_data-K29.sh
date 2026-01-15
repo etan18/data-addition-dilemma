@@ -70,7 +70,7 @@ run_hospital() {
         --complete-train \
         -m K29 \
         --cpu \
-        -ls _mondrian
+        -ls _catboost
 }
 
 for hospital1 in "${hospital_ids_subset[@]}"; do
