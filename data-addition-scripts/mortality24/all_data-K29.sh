@@ -44,6 +44,13 @@ export PYTORCH_NO_CUDA="1"
 # Ensure single device when running on CPU
 export YAIB_TRAINER_DEVICES="${YAIB_TRAINER_DEVICES:-1}"
 
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+
+# Disable wandb logging for batch runs to avoid wandb.log errors.
+export WANDB_MODE="${WANDB_MODE:-disabled}"
+export WANDB_DISABLED="${WANDB_DISABLED:-true}"
+
 # Base directory for logs (matches -l in tune-K29.sh)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_BASE="${LOG_BASE:-${SCRIPT_DIR}/../../yaib_logs}"
@@ -62,7 +69,8 @@ run_hospital() {
         -hit "$hospital1" \
         --complete-train \
         -m K29 \
-        --cpu
+        --cpu \
+        -ls _mondrian
 }
 
 for hospital1 in "${hospital_ids_subset[@]}"; do

@@ -5,9 +5,13 @@ include "configs/prediction_models/common/MLCommon.gin"
 
 # Train params
 train_common.model = @K29Classifier
+train_common.use_wandb = False
 
 # Hyperparameter tuning settings
 model/hyperparameter.class_to_tune = @K29Classifier
-model/hyperparameter.n_rff_features = (64, 2048)
-model/hyperparameter.gamma = (1e-4, 10.0, "log-uniform")
+model/hyperparameter.n_trees = (25, 200)
+model/hyperparameter.lifetime = (0.5, 20.0, "log-uniform")
+model/hyperparameter.max_depth = (5, 40)
+model/hyperparameter.prior = (0.1, 0.9)
+model/hyperparameter.prior_strength = (0.5, 10.0, "log-uniform")
 model/hyperparameter.categorical_index = -1
