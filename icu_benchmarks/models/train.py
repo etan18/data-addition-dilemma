@@ -138,7 +138,7 @@ def train_common(
 
     model.set_weight(weight, train_dataset)
     model.set_trained_columns(train_dataset.get_feature_names())
-    loggers = [TensorBoardLogger(save_dir=log_dir, default_hp_metric=False), JSONMetricsLogger(log_dir)]
+    loggers = [TensorBoardLogger(log_dir), JSONMetricsLogger(log_dir)]
     if use_wandb:
         loggers.append(WandbLogger(save_dir=log_dir))
     callbacks = [
@@ -148,7 +148,7 @@ def train_common(
     ]
     if verbose:
         callbacks.append(TQDMProgressBar(refresh_rate=min(100, len(train_loader) // 2)))
-    if precision in (16, "16-mixed"):
+    if precision == 16 or "16-mixed":
         torch.set_float32_matmul_precision("medium")
 
     trainer = Trainer(
