@@ -117,22 +117,33 @@ class K29Classifier(MLWrapper):
     def __init__(
         self,
         *args,
-        n_rff_features: int = 100,
-        gamma: float = 1.0,
-        random_state: int = None,
+        n_trees: int = 50,
+        lifetime: float = 5.0,
+        max_depth: int = 30,
+        random_state: Optional[int] = None,
+        prior: float = 0.5,
+        prior_strength: float = 2.0,
         categorical_index: Optional[int] = -1,
-        test_hospital_id: Optional = None,
         **kwargs,
     ):
         self.categorical_index = categorical_index
-        self.n_rff_features = int(n_rff_features)
-        if self.n_rff_features < 1:
-            raise ValueError("n_rff_features must be at least 1.")
+        if n_trees < 1:
+            raise ValueError("n_trees must be at least 1.")
+        if max_depth < 1:
+            raise ValueError("max_depth must be at least 1.")
+        if lifetime <= 0:
+            raise ValueError("lifetime must be positive.")
+        if not 0.0 <= prior <= 1.0:
+            raise ValueError("prior must be between 0 and 1.")
+        if prior_strength <= 0:
+            raise ValueError("prior_strength must be positive.")
         self.model = K29(
-            n_rff_features=self.n_rff_features,
-            gamma=gamma,
+            n_trees=int(n_trees),
+            lifetime=float(lifetime),
+            max_depth=int(max_depth),
             random_state=random_state,
-            test_hospital_id=test_hospital_id,
+            prior=float(prior),
+            prior_strength=float(prior_strength),
         )
         super().__init__(*args, **kwargs)
 
