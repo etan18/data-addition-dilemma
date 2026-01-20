@@ -14,6 +14,7 @@ from icu_benchmarks.contants import RunMode
 from icu_benchmarks.models.utils import export_catboost_feature_artifacts
 from wandb.integration.lightgbm import wandb_callback
 from defensive_forecasting.k29_algorithm import K29
+from defensive_forecasting.mondrian_forest import MondrianForest
 
 
 class LGBMWrapper(MLWrapper):
@@ -138,6 +139,80 @@ class K29Classifier(MLWrapper):
 
     def _prepare_features(self, features):
         """Move the configured categorical column to the last position for K29."""
+        if self.categorical_index is None:
+            return np.asarray(features)
+
+        arr = np.asarray(features)
+        cat_idx = self.categorical_index if self.categorical_index >= 0 else arr.shape[-1] + self.categorical_index
+        if cat_idx < 0 or cat_idx >= arr.shape[-1]:
+            raise ValueError(f"categorical_index {self.categorical_index} out of bounds for input with shape {arr.shape}.")
+
+        if arr.ndim == 1:
+            if cat_idx == arr.shape[0] - 1:
+                return arr
+            categorical = np.array([arr[cat_idx]])
+            continuous = np.delete(arr, cat_idx, axis=0)
+            return np.concatenate([continuous, categorical], axis=0)
+
+        if cat_idx == arr.shape[1] - 1:
+            return arr
+
+        categorical = arr[:, cat_idx][:, None]
+        continuous = np.delete(arr, cat_idx, axis=1)
+        return np.concatenate([continuous, categorical], axis=1)
+
+    def fit_model(self, train_data, train_labels, val_data, val_labels):
+        prepared_train = self._prepare_features(train_data)
+        self.model.fit(prepared_train, train_labels)
+        val_pred = self.predict(val_data)
+        return self.loss(val_labels, val_pred)
+
+    def predict(self, features):
+        prepared_features = self._prepare_features(features)
+        positive_prob = np.asarray(self.model.predict(prepared_features), dtype=float)
+        if positive_prob.ndim == 0:
+            positive_prob = np.array([positive_prob])
+        negative_prob = 1.0 - positive_prob
+        stacked = np.vstack([negative_prob, positive_prob]).T
+        return stacked
+
+
+@gin.configurable
+class MondrianForestClassifier(MLWrapper):
+    _supported_run_modes = [RunMode.classification]
+
+    def __init__(
+        self,
+        *args,
+        n_trees: int = 50,
+        lifetime: float = 5.0,
+        max_depth: int = 30,
+        random_state: Optional[int] = None,
+        prior: float = 0.5,
+        prior_strength: float = 2.0,
+        n_rff_features: int = 100,
+        gamma: float = 1.0,
+        categorical_index: Optional[int] = -1,
+        **kwargs,
+    ):
+        self.categorical_index = categorical_index
+        self.n_rff_features = int(n_rff_features)
+        if self.n_rff_features < 1:
+            raise ValueError("n_rff_features must be at least 1.")
+        self.model = MondrianForest(
+            n_trees=n_trees,
+            lifetime=lifetime,
+            max_depth=max_depth,
+            random_state=random_state,
+            prior=prior,
+            prior_strength=prior_strength,
+            n_rff_features=self.n_rff_features,
+            gamma=gamma,
+        )
+        super().__init__(*args, **kwargs)
+
+    def _prepare_features(self, features):
+        """Move the configured categorical column to the last position for MondrianForest."""
         if self.categorical_index is None:
             return np.asarray(features)
 

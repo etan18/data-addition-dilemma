@@ -1,0 +1,17 @@
+# Settings for the Mondrian Forest defensive forecasting classifier.
+
+# Common settings for ML models
+include "configs/prediction_models/common/MLCommon.gin"
+
+# Train params
+train_common.model = @MondrianForestClassifier
+
+# Hyperparameter tuning settings
+model/hyperparameter.class_to_tune = @MondrianForestClassifier
+model/hyperparameter.n_trees = (20, 200)
+model/hyperparameter.lifetime = (1.0, 10.0)
+model/hyperparameter.max_depth = (5, 50)
+model/hyperparameter.prior_strength = (0.5, 5.0)
+model/hyperparameter.categorical_index = -1
+model/hyperparameter.n_rff_features = (64, 2048)
+model/hyperparameter.gamma = (1e-4, 10.0, "log-uniform")
