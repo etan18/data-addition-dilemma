@@ -59,6 +59,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("-svd", "--save_data", action="store_true", default=False, help="Save data without training")
     parser.add_argument("-addc", "--addition_cap", type=int, default=None, help="Cap the amount of data added to 1500")
     parser.add_argument("-adds", "--addition_subgroup_only", type=str, default=None, help="Add only individuals from target subgroup")
+    parser.add_argument("--rbf-kernel", default=False, action=BOA, help="Enable a Gaussian/RBF kernel feature map for ML models (default hyperparameters).",)
     return parser
 
 

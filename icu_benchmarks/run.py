@@ -191,6 +191,12 @@ def main(my_args=tuple(sys.argv[1:])):
             subgroup=args.addition_subgroup_only
         )
 
+    if args.rbf_kernel:
+        from icu_benchmarks.models.kernels import GaussianRBFKernel
+
+        gin.bind_parameter("MLWrapper.kernel", GaussianRBFKernel())
+        logging.info("Enabled Gaussian RBF kernel feature map for ML models.")
+
     log_full_line(f"Logging to {run_dir.resolve()}", level=logging.INFO)
     if evaluate:
         test_on = "test"
