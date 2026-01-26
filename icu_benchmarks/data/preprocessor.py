@@ -9,6 +9,7 @@ import pandas as pd
 from recipys.recipe import Recipe
 from recipys.selector import all_numeric_predictors, all_outcomes, has_type, all_of
 from recipys.step import (
+    StepScale,
     StepImputeFastForwardFill,
     StepImputeFastZeroFill,
     StepSklearn,
@@ -131,7 +132,8 @@ class DefaultClassificationPreprocessor(Preprocessor):
         
         sta_rec = Recipe(data[Split.train][Segment.static], [], vars[Segment.static])
         if self.scaling:
-            sta_rec.add_step(StepSklearn(StandardScaler(), sel=all_numeric_predictors()))
+            # sta_rec.add_step(StepSklearn(StandardScaler(), sel=all_numeric_predictors()))
+            sta_rec.add_step(StepScale())
 
         sta_rec.add_step(StepImputeFastZeroFill(sel=all_numeric_predictors()))
         sta_rec.add_step(StepSklearn(SimpleImputer(missing_values=None, strategy="most_frequent"), sel=has_type("object")))
@@ -160,7 +162,8 @@ class DefaultClassificationPreprocessor(Preprocessor):
     def _process_dynamic(self, data, vars):
         dyn_rec = Recipe(data[Split.train][Segment.dynamic], [], vars[Segment.dynamic], vars["GROUP"], vars["SEQUENCE"])
         if self.scaling:
-            dyn_rec.add_step(StepSklearn(StandardScaler(), sel=all_of(vars[Segment.dynamic])))
+            # dyn_rec.add_step(StepSklearn(StandardScaler(), sel=all_of(vars[Segment.dynamic])))
+            dyn_rec.add_step(StepScale())
         if self.imputation_model is not None:
             dyn_rec.add_step(StepImputeModel(model=self.model_impute, sel=all_of(vars[Segment.dynamic])))
         dyn_rec.add_step(StepSklearn(MissingIndicator(), sel=all_of(vars[Segment.dynamic]), in_place=False))

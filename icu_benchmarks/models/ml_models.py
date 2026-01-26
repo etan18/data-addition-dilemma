@@ -9,6 +9,7 @@ from sklearn import linear_model
 from sklearn import ensemble
 from sklearn import neural_network
 from sklearn import svm
+from sklearn.pipeline import Pipeline
 from icu_benchmarks.models.wrappers import MLWrapper
 from icu_benchmarks.contants import RunMode
 from icu_benchmarks.models.utils import export_catboost_feature_artifacts
@@ -78,13 +79,22 @@ class CatBoostClassifier(MLWrapper):
 
     def fit_model(self, train_data, train_labels, val_data, val_labels):
         """Train CatBoost with early stopping and return validation loss."""
-        train_pool = Pool(train_data, label=train_labels)
-        val_pool = Pool(val_data, label=val_labels)
+        estimator = self._get_final_estimator()
+        estimator.set_params(random_seed=int(np.random.get_state()[1][0]))
 
-        # Keep runs reproducible but still leverage gin-configured params.
-        self.model.set_params(random_seed=int(np.random.get_state()[1][0]))
+        if isinstance(self.model, Pipeline):
+            kernel = self.model.named_steps["kernel"]
+            kernel.fit(train_data)
+            train_features = kernel.transform(train_data)
+            val_features = kernel.transform(val_data)
+        else:
+            train_features = train_data
+            val_features = val_data
 
-        self.model.fit(
+        train_pool = Pool(train_features, label=train_labels)
+        val_pool = Pool(val_features, label=val_labels)
+
+        estimator.fit(
             train_pool,
             eval_set=val_pool,
             verbose=True,
@@ -92,7 +102,7 @@ class CatBoostClassifier(MLWrapper):
             early_stopping_rounds=self.hparams.patience,
         )
 
-        val_pred = self.model.predict_proba(val_data)
+        val_pred = estimator.predict_proba(val_features)
         return self.loss(val_labels, val_pred)
 
     def predict(self, features):

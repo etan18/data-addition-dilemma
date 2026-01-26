@@ -1,7 +1,7 @@
 import numpy as np
 from sklearn.kernel_approximation import RBFSampler
+from tqdm import tqdm
 
-EPS = 1e-12
 
 def binary_search(f, low=0, high=1, tol=1e-3):
     """
@@ -31,246 +31,186 @@ def binary_search(f, low=0, high=1, tol=1e-3):
             high = mid
 
 
+
 class K29:
     """
     K29 algorithm implementation with Random Fourier Features and categorical features.
+    Optimized version with improved runtime performance.
     """
-    def __init__(self, n_rff_features=100, gamma=1.0, random_state=None, test_hospital_id=None):
+    def __init__(
+        self,
+        n_rff_features=100,
+        gamma=1.0,
+        random_state=None,
+        test_hospital_id=None,
+    ):
         """
         Parameters:
-        n_rff_features (int): Number of Random Fourier Features to use
-        gamma (float): RBF kernel parameter for RFF
-        random_state (int): Random seed for reproducibility
+        n_rff_features (int): Number of Random Fourier Features PER SCALE
+        gamma (float or list[float]): kept for backward-compat; list of RBF gammas for multiscale kernel
         """
         self.n_rff_features = n_rff_features
-        self.gamma = gamma
         self.random_state = random_state
-        self.test_hospital_id = test_hospital_id
-        
+
+        # multiscale: if None, fall back to single gamma
+        if isinstance(gamma, list):
+            if len(gamma) == 1:
+                self.gamma = gamma[0]
+            else:
+                self.gammas = gamma
+        else:
+            self.gamma = gamma
+
+        # residual reweighting
+        self.pos_weight = 10.0
+        self.neg_weight = 1.0
+
         # History storage
-        self.history_z = []  # Continuous features (d-1 dimensions)
-        self.history_g = []  # Categorical features (last dimension)
-        self.history_p = []  # Predictions
-        self.history_y = []  # Labels
-        self.history_rff_z = []  # Cached RFF features for continuous part
-        
-        # RFF transformer
-        self.rff = None
+        self.history_z = []
+        self.history_g = []
+        self.history_p = []
+        self.history_y = []
+        self.history_rff_z = []  # now stores MULTISCALE rff vector
+
+        # RFF transformer(s)
+        self.rffs = None  # list[RBFSampler]
         self.fitted_ = False
-        
+
     def _split_features(self, X):
-        """
-        Split X into continuous features z and categorical feature g.
-        X has d features: first d-1 are continuous (z), last is categorical (g).
-        
-        Parameters:
-        X (array-like): Features of shape (n_samples, d) or (d,)
-        
-        Returns:
-        z (array): Continuous features of shape (n_samples, d-1) or (d-1,)
-        g (array): Categorical features of shape (n_samples,) or scalar
-        """
         X = np.asarray(X)
         if X.ndim == 1:
             z = X[:-1]
             g = X[-1]
+            g = g.item() if isinstance(g, np.ndarray) else g
         else:
             z = X[:, :-1]
             g = X[:, -1]
         return z, g
-    
-    def _phi(self, z, p):
+
+    # NEW helper: multiscale transform
+    def _rff_transform(self, z_1d):
         """
-        Feature mapping: Phi(z, p) = (RFF(z), p)
-        
-        Parameters:
-        z (array): Continuous features of shape (d-1,) or (n_samples, d-1)
-        p (float or array): Probability predictions
-        
-        Returns:
-        array: Phi features of shape (n_rff_features + 1,) or (n_samples, n_rff_features + 1)
+        Returns concatenated RFF features across all scales.
+        z_1d: shape (d-1,)
+        returns: shape (len(gammas)*n_rff_features,)
         """
-        z = np.asarray(z)
-        if z.ndim == 1:
-            # Single sample
-            rff_z = self.rff.transform(z.reshape(1, -1))[0]
-            return np.concatenate([rff_z, [p]])
-        else:
-            # Multiple samples
-            rff_z = self.rff.transform(z)
-            p_array = np.asarray(p)
-            if p_array.ndim == 0:
-                p_array = np.full(len(z), p)
-            return np.column_stack([rff_z, p_array])
-    
-    def _kernel(self, z1, g1, p1, z2, g2, p2):
-        """
-        Kernel function: k((z,g,p), (z',g',p')) = <Phi(z,p), Phi(z',p')> * (1{g=g'} + 1)
-        
-        Parameters:
-        z1, z2: Continuous features
-        g1, g2: Categorical features
-        p1, p2: Probability predictions
-        
-        Returns:
-        float: Kernel value
-        """
-        phi1 = self._phi(z1, p1)
-        phi2 = self._phi(z2, p2)
-        
-        # Dot product of Phi features
-        dot_product = np.dot(phi1, phi2)
-        
-        # Categorical factor: 2 if g1 == g2, else 1
-        # Handle numpy array comparisons
-        g1_val = g1.item() if isinstance(g1, np.ndarray) else g1
-        g2_val = g2.item() if isinstance(g2, np.ndarray) else g2
-        categorical_factor = 2.0 if g1_val == g2_val else 1.0
-        
-        return dot_product * categorical_factor
-    
+        z_1d = np.asarray(z_1d)
+        feats = [rff.transform(z_1d.reshape(1, -1))[0] for rff in self.rffs]
+        return np.concatenate(feats, axis=0)
+
     def fit(self, X, y):
-        """
-        Fit the model to the data using online learning.
-        
-        Parameters:
-        X (array-like): n by d matrix where first d-1 columns are continuous, last is categorical
-        y (array-like): array of binary labels in [0,1]
-        
-        Returns:
-        self: Fitted model
-        """
         X = np.asarray(X)
         y = np.asarray(y)
-        
         assert X.shape[0] == len(y), "X and y must have the same number of samples"
-        
         n = X.shape[0]
 
-        rng = np.random if self.random_state is None else np.random.RandomState(self.random_state)
-
-        if self.test_hospital_id is None:
-            permutation = rng.permutation(n)
+        if self.random_state is None:
+            permutation = np.random.permutation(n)
         else:
-            # Process the held-out hospital first, then a shuffled remainder
-            _, g_all = self._split_features(X)
-            mask = g_all == self.test_hospital_id
-            test_indices = np.nonzero(mask)[0]
-            other_indices = np.nonzero(~mask)[0]
-            rng.shuffle(other_indices)
-            permutation = np.concatenate([test_indices, other_indices])
+            rng = np.random.RandomState(self.random_state)
+            permutation = rng.permutation(n)
 
         X = X[permutation]
         y = y[permutation]
-        
-        # Initialize history
+
+        # If pos_weight not provided, set it to inverse prevalence (common default)
+        if self.pos_weight is None:
+            pos_rate = float(np.mean(y))
+            # avoid divide-by-zero
+            self.pos_weight = (1.0 / max(pos_rate, 1e-8))
+
+        # Reset history
         self.history_z = []
         self.history_g = []
         self.history_p = []
         self.history_y = []
         self.history_rff_z = []
-        
-        # Process data sequentially
-        for i in range(n):
-            z_i, g_i = self._split_features(X[i])
-            
-            if i == 0:
-                # First point: use p = 0.5
-                p_i = 0.5
-                # Initialize RFF on first continuous features
-                # sklearn's RBFSampler uses gamma parameter
-                self.rff = RBFSampler(
-                    n_components=self.n_rff_features,
-                    gamma=self.gamma,
-                    random_state=self.random_state
-                )
-                self.rff.fit(z_i.reshape(1, -1))
-            else:
-                # Make prediction using current history
-                p_i = self.predict(X[i])
 
-            rff_z_i = self.rff.transform(z_i.reshape(1, -1))[0]
-            
-            # Store in history
+        for i in tqdm(range(n)):
+            z_i, g_i = self._split_features(X[i])
+
+            if i == 0:
+                p_i = 0.5
+
+                # Initialize multiscale RFFs on first point
+                self.rffs = []
+                # make deterministic-but-different seeds per gamma
+                base_seed = self.random_state if self.random_state is not None else None
+                for j, gm in enumerate(self.gammas):
+                    rs = None if base_seed is None else int(base_seed + 10007 * j)
+                    rff = RBFSampler(
+                        n_components=self.n_rff_features,
+                        gamma=float(gm),
+                        random_state=rs
+                    )
+                    rff.fit(z_i.reshape(1, -1))
+                    self.rffs.append(rff)
+            else:
+                p_i = self._predict_single(X[i])
+
+            rff_z_i = self._rff_transform(z_i)
+
             self.history_z.append(z_i)
             self.history_g.append(g_i)
             self.history_p.append(p_i)
             self.history_y.append(y[i])
             self.history_rff_z.append(rff_z_i)
-        
+
         self.fitted_ = True
         return self
-    
-    def predict(self, X):
-        """
-        Make predictions on new data points.
-        
-        Parameters:
-        X (array-like): Data to predict on, shape (n_samples, d) or (d,)
-        
-        Returns:
-        array or float: Predicted probabilities
-        """
-        if self.rff is None:
-            raise ValueError("Model must be fitted before making predictions.")
-        
-        X = np.asarray(X)
-        single_sample = X.ndim == 1
-        
-        if single_sample:
-            X = X.reshape(1, -1)
-        
-        predictions = []
-        
-        for x in X:
-            z, g = self._split_features(x)
-            g = g.item() if isinstance(g, np.ndarray) else g
 
-            rff_z = self.rff.transform(z.reshape(1, -1))[0]
-            history_len = len(self.history_z)
-            
-            if history_len:
-                history_rff = np.vstack(self.history_rff_z)
-                history_p = np.asarray(self.history_p, dtype=float)
-                history_y = np.asarray(self.history_y, dtype=float)
-                history_g = np.asarray(self.history_g, dtype=object)
-                categorical_factors = np.where(history_g == g, 2.0, 1.0).astype(float)
-                rff_dot_history = history_rff @ rff_z
-            else:
-                history_p = history_y = residuals = rff_dot_history = categorical_factors = None
-            
-            # Compute potential function S_t(p)
-            def potential(p):
-                """
-                S_t(p) = sum_{i=1}^{t-1} k((z_t, p), (z_i, p_i)) * (y_i - p_i)
-                         + (1/2) * k((z_t, p), (z_t, p)) * (1 - 2p)
+    def _predict_single(self, X):
+        z, g = self._split_features(X)
 
-                where k(z1, g1, p1, z2, g2, p2) = (Phi(z1) . Phi(z2)) * categorical_factor
-                """
-                s = 0.0
+        rff_z = self._rff_transform(z)  # multiscale
+        history_len = len(self.history_z)
 
-                if history_len:
-                    dot_products = rff_dot_history + (p * history_p)
-                    k_vals = dot_products * categorical_factors
-                    s += np.dot(k_vals, history_y - history_p)
-                
-                # Add the self-kernel term
-                k_self = self._kernel(z, g, p, z, g, p)
-                s += 0.5 * k_self * (1 - 2 * p)
-                
-                return s
-            
-            # Find p such that S_t(p) = 0
-            if potential(1) >= 0:
-                pred = 1.0 - EPS
-            elif potential(0) <= 0:
-                pred = 0.0 + EPS
-            else:
-                pred = binary_search(potential)
-            
-            predictions.append(pred)
-        
-        if single_sample:
-            return predictions[0]
+        if history_len > 0:
+            history_rff = np.array(self.history_rff_z)              # (t, Dms)
+            history_p = np.array(self.history_p, dtype=np.float64)  # (t,)
+            history_y = np.array(self.history_y, dtype=np.float64)  # (t,)
+
+            # base residuals
+            residuals = history_y - history_p  # (t,)
+
+            # NEW: reweight residuals by label
+            # (y==1)*pos_weight + (y==0)*neg_weight
+            weights = np.where(history_y > 0.5, float(self.pos_weight), float(self.neg_weight))
+            residuals = residuals * weights
+
+            categorical_factors = np.empty(history_len, dtype=np.float64)
+            for idx in range(history_len):
+                categorical_factors[idx] = 2.0 if self.history_g[idx] == g else 1.0
+
+            rff_dot_history = history_rff @ rff_z  # (t,)
         else:
-            return np.array(predictions)
+            history_p = residuals = rff_dot_history = categorical_factors = None
+
+        rff_self = float(np.dot(rff_z, rff_z))
+
+        def potential(p):
+            s = 0.0
+            if history_len > 0:
+                dot_products = rff_dot_history + p * history_p + 1.0
+                k_vals = dot_products * categorical_factors
+                s += float(np.dot(k_vals, residuals))
+
+            dot_self = rff_self + p * p + 1.0
+            s += float(dot_self * (1.0 - 2.0 * p))
+            return s
+
+        pot_1 = potential(1.0)
+        if pot_1 >= 0:
+            return 1.0
+
+        pot_0 = potential(0.0)
+        if pot_0 <= 0:
+            return 0.0
+
+        return binary_search(potential)
+
+    def predict(self, X):
+        X = np.asarray(X)
+        if X.ndim == 2:
+            return np.array([self._predict_single(row) for row in X], dtype=float)
+        return float(self._predict_single(X))

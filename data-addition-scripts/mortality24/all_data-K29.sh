@@ -62,7 +62,8 @@ run_hospital() {
         -hit "$hospital1" \
         --complete-train \
         -m K29 \
-        --cpu
+        --cpu \
+        -ls _regularized
 }
 
 for hospital1 in "${hospital_ids_subset[@]}"; do
