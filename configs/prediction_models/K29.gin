@@ -5,9 +5,16 @@ include "configs/prediction_models/common/MLCommon.gin"
 
 # Train params
 train_common.model = @K29Classifier
+K29Classifier.gamma = [1e-4, 1e-3, 1e-2, 0.1, 1.0, 2.0, 4.0]
+K29Classifier.pos_weight = 20.0
+K29Classifier.neg_weight = 1.0
+K29Classifier.log_curve = True
 
 # Hyperparameter tuning settings
 model/hyperparameter.class_to_tune = @K29Classifier
 model/hyperparameter.n_rff_features = (64, 2048)
-model/hyperparameter.gamma = (1e-4, 10.0, "log-uniform")
 model/hyperparameter.categorical_index = -1
+
+K29Classifier.wandb_log_hparams = True
+K29Classifier.wandb_metadata = {"notes": "added lr and weight decay"}
+
