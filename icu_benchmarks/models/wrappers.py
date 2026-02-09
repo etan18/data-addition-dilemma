@@ -587,7 +587,8 @@ class MLWrapper(BaseModule, ABC):
     def save_model(self, save_path, file_name, file_extension=".joblib"):
         path = save_path / (file_name + file_extension)
         try:
-            dump(self.model, path)
+            # Persist the full wrapper so eval-only restores expected wrapper methods.
+            dump(self, path)
             logging.info(f"Model saved to {str(path.resolve())}.")
         except Exception as e:
             logging.error(f"Cannot save model to path {str(path.resolve())}: {e}.")
