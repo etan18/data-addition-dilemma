@@ -1,4 +1,5 @@
 import json
+import os
 from typing import Dict
 from pathlib import Path
 from datetime import timedelta
@@ -8,6 +9,10 @@ import gin
 import logging
 import numpy as np
 import torch
+try:
+    import wandb
+except Exception:  # pragma: no cover - wandb is optional at runtime
+    wandb = None
 
 from pytorch_lightning.loggers.logger import Logger
 from pytorch_lightning.utilities import rank_zero_only
@@ -202,14 +207,24 @@ class JSONMetricsLogger(Logger):
 
     @rank_zero_only
     def log_metrics(self, metrics: Dict[str, float], step: Optional[int] = None) -> None:
+        all_metrics = dict(metrics)
+        curve_metrics = {key.split("/", 1)[1]: value for key, value in all_metrics.items() if key.startswith("curve/")}
+        if curve_metrics and step is not None:
+            output_file = self.output_dir / "curve_metrics.jsonl"
+            record = {"step": int(step)}
+            record.update(curve_metrics)
+            with output_file.open("a") as f:
+                json.dump(record, f, cls=JsonResultLoggingEncoder)
+                f.write("\n")
+
         old_metrics = {}
         stage_metrics = {
-            "train": {"/".join(key.split("/")[1:]): value for key, value in metrics.items() if key.startswith("train/")},
-            "val": {"/".join(key.split("/")[1:]): value for key, value in metrics.items() if key.startswith("val/")},
-            "test": {"/".join(key.split("/")[1:]): value for key, value in metrics.items() if key.startswith("test/")},
+            "train": {"/".join(key.split("/")[1:]): value for key, value in all_metrics.items() if key.startswith("train/")},
+            "val": {"/".join(key.split("/")[1:]): value for key, value in all_metrics.items() if key.startswith("val/")},
+            "test": {"/".join(key.split("/")[1:]): value for key, value in all_metrics.items() if key.startswith("test/")},
         }
-        for stage, metrics in stage_metrics.items():
-            if metrics:
+        for stage, stage_values in stage_metrics.items():
+            if stage_values:
                 output_file = self.output_dir / f"{stage}_metrics.json"
                 old_metrics = {}
                 if output_file.exists():
@@ -220,9 +235,32 @@ class JSONMetricsLogger(Logger):
                     except json.decoder.JSONDecodeError:
                         logging.warning("could not decode json file, overwriting...")
 
-                old_metrics.update(metrics)
+                old_metrics.update(stage_values)
                 with output_file.open("w") as f:
                     json.dump(old_metrics, f, cls=JsonResultLoggingEncoder, indent=4)
+
+        if wandb is not None and wandb.run is not None:
+            cleaned = {}
+            metric_prefix = os.getenv("YAIB_WANDB_METRIC_PREFIX", "").strip().strip("/")
+            for key, value in all_metrics.items():
+                if isinstance(value, np.generic):
+                    value = value.item()
+                if isinstance(value, torch.Tensor):
+                    if value.numel() != 1:
+                        continue
+                    value = value.item()
+                if isinstance(value, (list, tuple, dict, np.ndarray)):
+                    continue
+                try:
+                    metric_key = f"{metric_prefix}/{key}" if metric_prefix else key
+                    cleaned[metric_key] = float(value)
+                except (TypeError, ValueError):
+                    continue
+            if cleaned:
+                if step is None:
+                    wandb.log(cleaned)
+                else:
+                    wandb.log(cleaned, step=int(step))
 
     @property
     def version(self):

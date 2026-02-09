@@ -1,5 +1,6 @@
 from ignite.contrib.metrics import AveragePrecision, ROC_AUC, RocCurve, PrecisionRecallCurve
 from ignite.metrics import Accuracy, RootMeanSquaredError
+import numpy as np
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import (
     average_precision_score,
@@ -30,9 +31,16 @@ from icu_benchmarks.models.custom_metrics import (
     SubgroupAUC, 
 )
 
+def binary_accuracy_from_probs(labels, probs, threshold: float = 0.5):
+    labels = np.asarray(labels).ravel()
+    probs = np.asarray(probs).ravel()
+    preds = (probs >= threshold).astype(labels.dtype)
+    return accuracy_score(labels, preds)
+
 
 class MLMetrics:
     BINARY_CLASSIFICATION = {
+        "Accuracy": binary_accuracy_from_probs,
         "AUC": roc_auc_score,
         "Calibration_Curve": calibration_curve,
         "PR": average_precision_score,

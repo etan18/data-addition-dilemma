@@ -131,9 +131,11 @@ def execute_repeated_cv(
             preprocess_time = datetime.now() - start_time
             start_time = datetime.now()
 
-            fold_loss, patient_data = train_common(
+            train_only_flag = complete_train and train_only
+            train_result = train_common(
                 data, 
                 log_dir=repetition_fold_dir,
+                save_model_dir=log_dir if train_only_flag else None,
                 eval_only=eval_only,
                 load_weights=load_weights,
                 source_dir=source_dir,
@@ -143,28 +145,34 @@ def execute_repeated_cv(
                 cpu=cpu,
                 verbose=verbose,
                 use_wandb=wandb,
-                train_only=complete_train and train_only # if we dont test if there's no test set AND the complete train flag is on
+                train_only=train_only_flag # if we dont test if there's no test set AND the complete train flag is on
             )
+            if train_only_flag:
+                fold_loss = train_result
+                patient_data = None
+            else:
+                fold_loss, patient_data = train_result
             agg_loss += fold_loss
             train_time = datetime.now() - start_time
             
-            # Save patient-level results to an npz file
-            np.savez(
-                repetition_fold_dir / "patient_results.npz",
-                train_ids=patient_data["train_ids"],
-                train_races=patient_data["train_races"],
-                test_ids=patient_data["test_ids"],
-                test_races=patient_data["test_races"],
-                val_ids=patient_data["val_ids"],
-                val_races=patient_data["val_races"],
-                val_predictions=patient_data["val_predictions"],
-                val_true_labels=patient_data["val_true_labels"],
-                val_pred_labels=patient_data["val_pred_labels"],
-                thresh=patient_data["val_thresh"],
-                predictions=patient_data["predictions"],
-                pred_labels=patient_data["pred_labels"],
-                true_labels=patient_data["true_labels"],
-            )
+            if patient_data is not None:
+                # Save patient-level results to an npz file
+                np.savez(
+                    repetition_fold_dir / "patient_results.npz",
+                    train_ids=patient_data["train_ids"],
+                    train_races=patient_data["train_races"],
+                    test_ids=patient_data["test_ids"],
+                    test_races=patient_data["test_races"],
+                    val_ids=patient_data["val_ids"],
+                    val_races=patient_data["val_races"],
+                    val_predictions=patient_data["val_predictions"],
+                    val_true_labels=patient_data["val_true_labels"],
+                    val_pred_labels=patient_data["val_pred_labels"],
+                    thresh=patient_data["val_thresh"],
+                    predictions=patient_data["predictions"],
+                    pred_labels=patient_data["pred_labels"],
+                    true_labels=patient_data["true_labels"],
+                )
 
             log_full_line(
                 f"FINISHED FOLD {fold_index}| PREPROCESSING DURATION {preprocess_time}| PROCEDURE DURATION {train_time}",

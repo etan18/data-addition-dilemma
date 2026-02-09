@@ -1,5 +1,6 @@
 from argparse import Namespace
 import logging
+import os
 from pathlib import Path
 
 import wandb
@@ -48,7 +49,11 @@ def wandb_log(log_dict):
         log_dict (dict): metric dict to log
     """
     if wandb_running():
-        wandb.log(log_dict)
+        metric_prefix = os.getenv("YAIB_WANDB_METRIC_PREFIX", "").strip().strip("/")
+        if metric_prefix:
+            wandb.log({f"{metric_prefix}/{key}": value for key, value in log_dict.items()})
+        else:
+            wandb.log(log_dict)
 
 
 def set_wandb_experiment_name(args, mode):
@@ -73,6 +78,14 @@ def set_wandb_experiment_name(args, mode):
         run_name += "_complete_training"
 
     if wandb_running():
-        wandb.config.update({"run-name": run_name})
+        # When resuming a run id across multiple commands (e.g., train + eval),
+        # keep the original run name instead of mutating config["run-name"].
+        existing_run_name = wandb.config.get("run-name")
+        if existing_run_name and existing_run_name != run_name:
+            logging.info(
+                f'Keeping existing wandb run-name "{existing_run_name}" (computed "{run_name}").'
+            )
+            return
+        wandb.config.update({"run-name": run_name}, allow_val_change=True)
         wandb.run.name = run_name
         wandb.run.save()

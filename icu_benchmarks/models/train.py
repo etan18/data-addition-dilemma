@@ -44,6 +44,7 @@ def assure_minimum_length(dataset):
 def train_common(
     data: dict[str, pd.DataFrame],
     log_dir: Path,
+    save_model_dir: Path = None,
     eval_only: bool = False,
     load_weights: bool = False,
     source_dir: Path = None,
@@ -73,6 +74,7 @@ def train_common(
         data: Dict containing data to be trained on.
         log_dir: Path to directory where model output should be saved.
         eval_only: If set to true, skip training and only evaluate the model.
+        save_model_dir: Optional run-level output directory for saving a single model artifact.
         load_weights: If set to true, skip training and load weights from source_dir instead.
         source_dir: If set to load weights, path to directory containing trained weights.
         reproducible: If set to true, set torch to run reproducibly.
@@ -172,12 +174,18 @@ def train_common(
             logging.info("Training complete.")
         else:
             logging.info("Training ML model.")
+            model.metrics_logger = JSONMetricsLogger(log_dir)
             model.fit(train_dataset, val_dataset)
-            # model.save_model(log_dir, "last")
+            # For complete-train workflows, persist a single canonical model artifact.
+            if train_only:
+                target_dir = save_model_dir if save_model_dir is not None else log_dir
+                model.save_model(target_dir, "model")
             logging.info("Training complete.")
     if train_only:
         logging.info("Finished training full model.")
         save_config_file(log_dir)
+        if save_model_dir is not None and save_model_dir != log_dir:
+            save_config_file(save_model_dir)
         
         return 0
     
@@ -502,7 +510,16 @@ def load_model(model, source_dir, pl_model=True):
                 model.load_from_checkpoint(checkpoint)
         else:
             model_path = source_dir / "model.joblib"
-            model = load(model_path)
+            loaded = load(model_path)
+            if hasattr(loaded, "set_weight") and hasattr(loaded, "test_step"):
+                model = loaded
+            else:
+                # Backward compatibility: older artifacts may only contain raw sklearn/catboost estimators.
+                supported_modes = getattr(model, "_supported_run_modes", [RunMode.classification])
+                wrapper_mode = supported_modes[0] if supported_modes else RunMode.classification
+                wrapper = model(run_mode=wrapper_mode)
+                wrapper.model = loaded
+                model = wrapper
     else:
         raise Exception(f"No weights to load at path : {source_dir}")
     logging.info(f"Loaded {type(model)} model from {model_path}")
